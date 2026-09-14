@@ -1,0 +1,37 @@
+{
+  "name": "ecommerce-store",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Harper Ecommerce Store \u2014 the golden reference implementation of a Harper-native ecommerce catalog.",
+  "license": "MIT",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "harper dev .",
+    "build": "next build",
+    "start": "harper run .",
+    "seed": "node --run seed --workspace @ecommerce-store/seed",
+    "test:e2e": "npm test --prefix e2e",
+    "typecheck": "tsc --build"
+  },
+  "dependencies": {
+    "@ecommerce-store/spec": "*",
+    "@ecommerce-store/ui": "*",
+    "@harperfast/nextjs": "2.2.4",
+    "next": "16.3.5",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@ecommerce-store/seed": "*",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "harper": "5.2.12",
+    "typescript": "^5.9.0"
+  }
+}

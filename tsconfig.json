@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "jsx": "preserve",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "incremental": true,
+    "paths": {
+      "@ecommerce-store/spec": ["./packages/spec/src/index.ts"],
+      "@ecommerce-store/ui": ["./packages/ui/src/index.ts"]
+    }
+  },
+  "include": ["app/**/*", "resources/**/*", "packages/*/src/**/*", "next.config.ts"],
+  "exclude": ["node_modules", ".next"]
+}

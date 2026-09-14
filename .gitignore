@@ -1,0 +1,20 @@
+# npm pack falls back to .gitignore when there is no .npmignore, and `deploy_component`
+# packs this tree via `npm pack --ignore-scripts`. Anything ignored here is absent from the
+# deployed component. Do not add a path the runtime needs.
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+
+# Local env — never deployed. Secrets reach a node via `harper deploy` credentials/secrets.
+.env
+.env.local
+
+# Generated catalog corpora (deterministic; regenerate with `npm run seed`)
+/.seed-cache/
+
+# Agent worktrees and scratch
+/.claude/worktrees/
+/.claude/tmp/
+
+.DS_Store

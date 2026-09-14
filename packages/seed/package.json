@@ -1,0 +1,14 @@
+{
+  "name": "@ecommerce-store/seed",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Deterministic tiered catalog generator (sm/md/lg). Dev-only: every dependency here MUST stay in devDependencies or it ships to the node.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "seed": "node --experimental-strip-types src/cli.ts"
+  },
+  "devDependencies": {}
+}

@@ -1,0 +1,14 @@
+{
+  "name": "@ecommerce-store/ui",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared presentational React components. Deliberately logic-free so every platform implementation renders identical markup.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "peerDependencies": {
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  }
+}

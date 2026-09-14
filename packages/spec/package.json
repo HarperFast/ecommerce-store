@@ -1,0 +1,11 @@
+{
+  "name": "@ecommerce-store/spec",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Machine-readable half of SPEC.md: route contract, request/response types, requirement ids. Platform-neutral — this package is what a competitor implementation is checked against.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {}
+}
