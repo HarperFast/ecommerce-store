@@ -3,9 +3,10 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Playwright suite — the executable spec. Runs against ANY implementation via BASE_URL, which is why it is deliberately NOT an npm workspace of the app: see docs/structure.md.",
+  "description": "Playwright suite \u2014 the executable spec. Runs against ANY implementation via BASE_URL, which is why it is deliberately NOT an npm workspace of the app: see docs/structure.md.",
   "scripts": {
-    "test": "playwright test"
+    "test": "playwright test",
+    "coverage": "node scripts/coverage.mjs"
   },
   "dependencies": {
     "@ecommerce-store/spec": "file:../packages/spec"

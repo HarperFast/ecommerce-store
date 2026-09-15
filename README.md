@@ -2,8 +2,9 @@
 
 The golden reference implementation of a Harper-native ecommerce catalog.
 
-> **Status: P0 — spec freeze.** The scaffold and the structural decisions are in place.
-> `SPEC.md` is not written yet, and there is no application code by design.
+> **Status: P0 — spec freeze, awaiting review.** [`SPEC.md`](SPEC.md) is written and
+> self-review has passed; cross-model and human review are outstanding. There is no
+> application code by design, and none is written until the gate passes.
 
 ## What this is
 
@@ -43,6 +44,28 @@ Catalog page delivery at scale — which is what Harper ecommerce deployments ac
 | Writes | Admin REST (**measured**) · cart/order (built, measured in v2) |
 | Realtime | Per-SKU inventory push to open PDPs |
 | Media | Deterministic generated placeholders; real media is a recorded expansion point |
+
+## Reading order
+
+| | |
+|---|---|
+| [`SPEC.md`](SPEC.md) | The specification. Numbered, platform-neutral requirements. Start here. |
+| [`packages/spec`](packages/spec) | Its machine-readable half — route contract, types, requirement registry. |
+| [`e2e/`](e2e) | Its executable half — every test names the requirements it covers. |
+| [`docs/structure.md`](docs/structure.md) | Why the repo is laid out this way. Read before adding a dependency. |
+| [`docs/data-model.md`](docs/data-model.md) | The variant model, and the aggregate-maintenance decision. |
+| [`docs/seed-design.md`](docs/seed-design.md) | Deterministic corpora and why they are distributed, not re-derived. |
+| [`docs/auth-design.md`](docs/auth-design.md) | Two principals, and the measured KDF parameter choice. |
+
+## Checks
+
+```bash
+npm run check
+```
+
+Runs four things, each with a committed negative test: SPEC.md agrees with the requirement
+registry; every applicable MUST has a test; the tree typechecks; and a simulated deploy
+lands nothing dev-only on the node.
 
 ## Structure
 
