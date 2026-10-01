@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "description": "Harper Ecommerce Store \u2014 the golden reference implementation for the Harper application architecture benchmarks.",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "workspaces": [
     "packages/*"
   ],
@@ -14,7 +14,7 @@
   "scripts": {
     "dev": "harper dev .",
     "start": "harper run .",
-    "seed": "npm run seed --workspace @ecommerce-store/seed",
+    "seed": "node packages/seed/src/cli.ts",
     "typecheck": "tsc --build",
     "test:e2e": "npm test --prefix e2e",
     "check": "npm run check:spec && npm run check:coverage && npm run typecheck && npm run check:deploy",

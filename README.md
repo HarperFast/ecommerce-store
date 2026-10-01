@@ -1,71 +1,106 @@
 # Harper Ecommerce Store
 
-The golden reference implementation for the [Harper Application Architecture Benchmarks](https://github.com/HarperFast/application-architecture-benchmarks).
+A Harper-native ecommerce catalog service, and the reference implementation for the [Harper Application Architecture Benchmarks](https://github.com/HarperFast/application-architecture-benchmarks).
 
-> **Status: P0 — spec draft.** [`SPEC.md`](SPEC.md) is written; the review gate has not been passed and there is no application code yet.
+It exists to be three things at once: a worked example of how to build an efficient Harper application, the home of the specification every benchmark implementation is measured against, and a target that is tested and benchmarked against each significant Harper release.
 
-## What this is
+> **Status: pre-release.** The specification has not passed its review gate and the conformance suite is incomplete. See [`docs/plan.md`](docs/plan.md).
 
-Three things at once:
+## The application
 
-1. **A Harper reference.** How to build an efficient Harper application, readable by a developer or customer who wants to understand the platform.
-2. **The specification's home.** It carries the conformance suite that defines what every benchmark implementation must do.
-3. **A benchmark target.** Tested and independently benchmarked against every significant Harper release.
+A catalog service for a large, variant-heavy store: 2 million products across 6.5 million purchasable SKUs, stocked across eight fulfillment locations.
 
-The methodology, the measurement rules, and the rules governing how results may be described live in the benchmarks repo and are **binding**. This repo defines the application.
+Two endpoints.
 
-> **The rule:** the specification is functional and stack-neutral; implementations are maximally native to their stack. If a requirement in `SPEC.md` could not be satisfied by Fastify + Postgres + Redis, it is mis-specified.
+### `POST /cart/:id/quote`
 
-## Scope
+Prices a cart. Resolves in four to five dependent waves — 60 to 150 record reads — because each wave needs the previous wave's answer before it can issue its own:
 
-P0 is deliberately small — two endpoints, one background writer, eight tables, one dataset:
+1. The cart.
+2. Product and variant for every line.
+3. Inventory across fulfillment locations, honouring location priority; and the customer's tier and loyalty balance.
+4. Eligible promotions by tier, SKU and category, then real pricing logic over them — stacking, exclusivity, thresholds, BOGO.
+5. Shipping by region and total cart weight; tax by jurisdiction.
 
-| | |
-|---|---|
-| `POST /cart/:id/quote` | The endpoint under test. Four to five dependent waves, 60–150 reads, real pricing logic. Every response is cart-unique, so no implementation can win by caching a response. |
-| `GET /product/:id?tier=&region=` | The read-heavy leg. Mostly cacheable, varies by tier and region. |
-| Background writes | A steady stream of inventory and price updates against the same records the reads touch, so caches have to stay coherent. Not an endpoint under test. |
+Every response is unique to its cart, so it is **never response-cacheable**. Entity caches still do the job real deployments give them.
 
-Storefront UI, auth, listing pages, search, checkout commit, images and realtime are future work. The reasoning and the decisions already taken on them are kept in [`docs/future-work.md`](docs/future-work.md) rather than rediscovered later.
+Promotions evaluate in a fixed order — exclusive, then threshold, then BOGO, then stackable, ties breaking on ascending promotion id, each discount rounding half-up as it is applied. The order is normative: without it two correct implementations disagree on a total.
 
-## Reading order
+### `GET /product/:id?tier=&region=`
 
-| | |
-|---|---|
-| [`SPEC.md`](SPEC.md) | The specification. Start here. |
-| [`packages/spec`](packages/spec) | Its machine-readable half — route contract, types, requirement registry. |
-| [`e2e/`](e2e) | Its executable half — every test names the requirements it covers. |
-| [`docs/data-model.md`](docs/data-model.md) | The eight tables, and why aggregates resolve on read. |
-| [`docs/seed-design.md`](docs/seed-design.md) | Why the dataset is committed rather than regenerated. |
-| [`docs/structure.md`](docs/structure.md) | Why the repo is laid out this way. Read before adding a dependency. |
-| [`docs/future-work.md`](docs/future-work.md) | What was scoped out, and the decisions that came with it. |
+The product aggregate: the product, its variants, live inventory for those variants, resolved price, review rollup, and related items. Mostly cacheable, but **price varies by tier and availability by region**, so both belong in any cache key.
 
-## Checks
+### Background writes
+
+A steady stream of inventory and price updates against the same records the reads touch. Not an endpoint, and not under test — it exists so caches have to stay coherent with their source of truth, which a read-only workload would never force.
+
+## Data model
+
+Eight tables, deliberately not pre-joined: `cart`, `customer`, `product`, `variant`, `inventory`, `location`, `promotion`, `rate`.
+
+Money is integer minor units end to end — no float ever enters a total. Product-level values are resolved on read rather than materialized on write, because the fan-out is the thing being measured. [`docs/data-model.md`](docs/data-model.md) has the reasoning, including what would reverse it.
+
+## Running it
+
+Requires [Git LFS](https://git-lfs.com) — the benchmark dataset lives there. `dev` does not.
 
 ```bash
-npm run check
+git lfs install && npm install
 ```
 
-Four checks, each with a committed negative test: `SPEC.md` agrees with the requirement registry; every MUST has a test; the tree typechecks; and a simulated deploy lands nothing dev-only on the node.
+Start Harper with the small development dataset:
+
+```bash
+npm run dev
+```
+
+```bash
+npm run seed -- --scale dev && node scripts/load-dataset.mjs --scale dev
+```
+
+```bash
+curl -s -X POST localhost:9926/cart/cart-000042/quote -H 'content-type: application/json' -d '{}'
+```
+
+## Datasets
+
+| | Rows | Stored | Use |
+|---|---|---|---|
+| `dev` | 46,583 | plain git, 5 MB | Local work. Loads in under two seconds. **Never a benchmark target** — it fits entirely in memory, the one thing the benchmark data must not do. |
+| `bench` | 40,656,446 | Git LFS, 329 MB compressed | The benchmark. ~4.5 GB expanded, against a 2 GiB container. |
+
+Both are generated once, committed, and verified by checksum before every load. Implementations do not re-derive them — identity is established by hash, not by every runtime reproducing one PRNG stream. [`docs/seed-design.md`](docs/seed-design.md).
+
+## Conformance
+
+[`SPEC.md`](SPEC.md) states 27 numbered, stack-neutral requirements. [`packages/spec`](packages/spec) is its machine-readable half; [`e2e/`](e2e) is its executable half, where every test names the requirement ids it covers.
+
+```bash
+npm run check && npm run test:e2e
+```
+
+If a requirement in `SPEC.md` could not be satisfied by Fastify + Postgres + Redis, it is mis-specified — please say so.
+
+## Benchmarking
+
+Containerized, with a fixed resource budget and the load generator outside it: [`containers/README.md`](containers/README.md). The harness and, just as importantly, the claims it does **not** support: [`bench/README.md`](bench/README.md).
+
+## Documentation
+
+| | |
+|---|---|
+| [`SPEC.md`](SPEC.md) | The specification |
+| [`docs/data-model.md`](docs/data-model.md) | The eight tables and why aggregates resolve on read |
+| [`docs/seed-design.md`](docs/seed-design.md) | Deterministic datasets, and why they are committed |
+| [`docs/structure.md`](docs/structure.md) | Repository layout. Read before adding a dependency |
+| [`docs/future-work.md`](docs/future-work.md) | What is out of scope, and the decisions behind it |
+| [`docs/plan.md`](docs/plan.md) | Development status, open decisions, what may not yet be claimed |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | How to propose changes |
 
 ## Versions
 
-Pinned and verified 2026-10-01: harper `5.2.12` · TypeScript `7.0.2` · Node `>=22`.
+harper `5.2.12` · Node `>=22` · TypeScript `7.0.2`
 
 ## License
 
-MIT
-
-## Development
-
-This repo uses **Git LFS** for the benchmark dataset. Install it before cloning, or the large files arrive as text pointers instead of data:
-
-```bash
-git lfs install
-```
-
-If you have already cloned without it, `git lfs pull` fixes it in place. The `dev` dataset is plain git and needs none of this.
-
-```bash
-npm install
-```
+[Apache 2.0](LICENSE)
