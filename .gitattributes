@@ -1,1 +1,15 @@
+# The benchmark dataset lives in Git LFS.
+#
+# Two reasons, and the first is not negotiable: inventory.ndjson.gz alone is 176 MB, over
+# GitHub's 100 MB hard limit for a regular file, so a push without LFS is simply rejected.
+# The second is that these are already-compressed archives — git can neither delta nor
+# compress them, so every regenerated version would add its full size to every clone forever.
 dataset/bench/*.ndjson.gz filter=lfs diff=lfs merge=lfs -text
+
+# The dev dataset is deliberately NOT in LFS. It is ~5 MB of plain NDJSON and its whole
+# purpose is to be there the moment someone clones, with no `git lfs pull` step between them
+# and a working application.
+
+# Datasets are generated artifacts: never merge them, and never show them in a diff.
+dataset/**/*.ndjson -diff -merge
+dataset/**/MANIFEST.json -merge
