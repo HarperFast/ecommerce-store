@@ -1,0 +1,49 @@
+{
+  "specVersion": "0.2.0-draft",
+  "generatorVersion": "0.1.0",
+  "scale": "bench",
+  "seed": "harper-ecommerce-store-v1",
+  "compressed": true,
+  "files": {
+    "location": {
+      "sha256": "a08e8170c4a0b6d2c08e5dfbf2d55e299eb5f6d858ef5733191d6a8a0efb4bd8",
+      "rows": 8
+    },
+    "customer": {
+      "sha256": "dee42ab596ba443119463782929af596d85af58227c94226d6ce514d571b4fe1",
+      "rows": 500000
+    },
+    "product": {
+      "sha256": "d2d0a6ba3abc96b30c7cab06df4ea2e35e1e92760eed569489574476219ae807",
+      "rows": 2000000
+    },
+    "variant": {
+      "sha256": "7f21172dea726993b2f6458cba6d68378657364eb6c2c764102644c9e7f8c908",
+      "rows": 6570143
+    },
+    "inventory": {
+      "sha256": "45d42a3332a1f9d83b713068e8304fac177c544bdd6293c180e4b84ea5758cab",
+      "rows": 31281273
+    },
+    "promotion": {
+      "sha256": "9fa8360b46065adbfe299ce509b10617b8bd43ce85af753a54272161de5fae19",
+      "rows": 5000
+    },
+    "rate": {
+      "sha256": "6791867a5e60a7f4b33e2ade00d0c9bcc4cd711c85eb4c8d146df3374387e72d",
+      "rows": 22
+    },
+    "cart": {
+      "sha256": "921ca3172f4a6d5dbe5b7ca6ba8fd86834bc2089229004a63b6ca27fd256ad8e",
+      "rows": 300000
+    }
+  },
+  "distributions": {
+    "variantsPerProduct": "long-tailed, 1-20",
+    "cartSize": "long-tailed, 1-25",
+    "locationsPerSku": "1-6 of 8",
+    "tier": "standard 60 / silver 25 / gold 12 / platinum 3",
+    "outOfStockRate": 0.12,
+    "accessSkew": "zipf-ish, exponent 1.1, over product index"
+  }
+}

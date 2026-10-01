@@ -24,9 +24,25 @@ const argOf = (name, fallback) => {
 
 const OPS_URL = argOf('url', 'http://localhost:9925');
 const BATCH = Number(argOf('batch', '5000'));
-const DIR = resolve(argOf('dataset', join(import.meta.dirname, '..', 'dataset')));
+const SCALE = argOf('scale', 'dev');
+// Defaults to the raw `dev` dataset. A bench run points at the expanded output of
+// scripts/prepare-dataset.mjs — nothing loads the gzipped form directly.
+const DIR = resolve(argOf('dataset', SCALE === 'dev'
+	? join(import.meta.dirname, '..', 'dataset', 'dev')
+	: join(import.meta.dirname, '..', '.work', 'dataset', SCALE)));
 const DATABASE = argOf('database', 'data');
 const VERIFY = !args.includes('--skip-verify');
+
+/**
+ * Credentials for the operations API.
+ *
+ * `harper dev` disables auth; `harper run` does not — so a loader that worked locally fails
+ * against the container with a 401. Read from the environment (containers/.env supplies
+ * them) rather than hardcoded.
+ */
+const USER = argOf('user', process.env.HDB_ADMIN_USERNAME ?? '');
+const PASSWORD = argOf('password', process.env.HDB_ADMIN_PASSWORD ?? '');
+const AUTH = USER ? `Basic ${Buffer.from(`${USER}:${PASSWORD}`).toString('base64')}` : null;
 
 // Load order matters only for readability; there are no foreign keys to satisfy.
 const TABLES = ['location', 'rate', 'promotion', 'customer', 'product', 'variant', 'inventory', 'cart'];
@@ -41,10 +57,16 @@ console.log(`dataset: scale ${manifest.scale}, seed ${manifest.seed}, generator 
 async function operation(body) {
 	const response = await fetch(OPS_URL, {
 		method: 'POST',
-		headers: { 'content-type': 'application/json' },
+		headers: { 'content-type': 'application/json', ...(AUTH ? { authorization: AUTH } : {}) },
 		body: JSON.stringify(body),
 	});
-	if (!response.ok) throw new Error(`${body.operation} failed: ${response.status} ${await response.text()}`);
+	if (!response.ok) {
+		const detail = await response.text();
+		if (response.status === 401) {
+			throw new Error(`${body.operation} failed: 401 — the operations API requires credentials. Set HDB_ADMIN_USERNAME/HDB_ADMIN_PASSWORD (containers/.env) or pass --user/--password. \`harper dev\` has auth disabled; \`harper run\` does not.`);
+		}
+		throw new Error(`${body.operation} failed: ${response.status} ${detail}`);
+	}
 	return response.json();
 }
 

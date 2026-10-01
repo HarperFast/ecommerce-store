@@ -38,6 +38,8 @@ export interface DatasetManifest {
 	/** Only `bench` is a valid benchmark target — SPEC.md DATA-004. */
 	scale: string;
 	seed: string;
+	/** Files are stored `.ndjson.gz`; checksums are always over the UNCOMPRESSED bytes. */
+	compressed: boolean;
 	/** table → { sha256, rows } */
 	files: Record<Table, { sha256: string; rows: number }>;
 	/**

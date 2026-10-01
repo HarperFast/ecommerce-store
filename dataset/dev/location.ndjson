@@ -1,0 +1,8 @@
+{"id":"loc-us-east-0","priority":0,"region":"us-east"}
+{"id":"loc-us-east-1","priority":1,"region":"us-east"}
+{"id":"loc-us-west-0","priority":0,"region":"us-west"}
+{"id":"loc-us-west-1","priority":1,"region":"us-west"}
+{"id":"loc-eu-central-0","priority":0,"region":"eu-central"}
+{"id":"loc-eu-central-1","priority":1,"region":"eu-central"}
+{"id":"loc-apac-0","priority":0,"region":"apac"}
+{"id":"loc-apac-1","priority":1,"region":"apac"}

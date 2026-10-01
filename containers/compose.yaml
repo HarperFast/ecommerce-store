@@ -1,0 +1,92 @@
+# Local, production-like benchmark topology.
+#
+# Two services with SEPARATE, EXPLICIT resource budgets:
+#
+#   harper  — the target. Gets the whole budget a competing stack would have to split across
+#             all of its processes (framework + database + cache + ...). That is the point of
+#             the comparison: an architecture spread over three containers pays for all three
+#             out of this same budget.
+#
+#   bench   — the load generator. Deliberately OUTSIDE the target's budget. If the generator
+#             spent the budget the architecture is being measured on, it would be quietly
+#             taking the thing under test away from itself.
+#
+# Networking: a user-defined bridge, identical for every target. Recorded with every run.
+# Host networking would be faster and would also make any future comparison invalid unless
+# every target used it too.
+
+name: harper-ecommerce-bench
+
+services:
+  harper:
+    build:
+      context: ..
+      dockerfile: containers/Dockerfile
+      args:
+        HARPER_VERSION: ${HARPER_VERSION:-5.2.12}
+    networks: [bench]
+    ports:
+      # Published only so a human can poke at it. The measured generator talks over the
+      # bridge network, not through these.
+      - "9926:9926"
+      - "9925:9925"
+    volumes:
+      # A named volume on a real filesystem. Never tmpfs.
+      - harper-data:/data
+    environment:
+      # Harper's worker-thread count. HARPER_SET_CONFIG takes a JSON object and overrides
+      # harperdb-config.yaml at boot. Default `threads` is 4; it is pinned to the container's
+      # CPU budget here so the target is not oversubscribed against its own limit, and so the
+      # value is explicit in the run record rather than inherited.
+      # Plain HTTP, deliberately. Outside dev mode Harper defaults to HTTPS on both ports, and
+      # TLS termination is a real per-request cost that has nothing to do with the
+      # architecture under test. Every target must make the same choice; it is recorded with
+      # the run.
+      HARPER_SET_CONFIG: '{"threads":${HARPER_THREADS:-2},"logging":{"level":"warn","stdStreams":true},"http":{"port":9926,"securePort":null},"operationsApi":{"network":{"port":9925,"securePort":null}}}'
+      # Harper's installer prompts interactively unless all three are supplied. Values live in
+      # containers/.env — local test credentials for a container that only ever gets
+      # benchmarked, reachable only on this compose bridge.
+      ROOTPATH: /data/harper
+      HDB_ADMIN_USERNAME: ${HDB_ADMIN_USERNAME:-benchadmin}
+      HDB_ADMIN_PASSWORD: ${HDB_ADMIN_PASSWORD:?set in containers/.env}
+    deploy:
+      resources:
+        limits:
+          cpus: "${TARGET_CPUS:-2}"
+          memory: "${TARGET_MEMORY:-2g}"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:9926/product/product-000000?tier=standard&region=us-east').then(r=>process.exit(r.status<500?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  bench:
+    image: node:24-slim
+    networks: [bench]
+    working_dir: /work
+    volumes:
+      - ../:/work:ro
+      - bench-results:/results
+    depends_on:
+      harper:
+        condition: service_healthy
+    environment:
+      TARGET_URL: http://harper:9926
+      OPS_URL: http://harper:9925
+    deploy:
+      resources:
+        limits:
+          cpus: "${BENCH_CPUS:-2}"
+          memory: "${BENCH_MEMORY:-1g}"
+    # Started on demand: `compose run --rm bench node bench/run.mjs ...`
+    profiles: [manual]
+    command: ["sleep", "infinity"]
+
+networks:
+  bench:
+    driver: bridge
+
+volumes:
+  harper-data:
+  bench-results:

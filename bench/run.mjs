@@ -56,6 +56,12 @@ const OUT = argOf('out', join(import.meta.dirname, 'results'));
  * but the achieved rate for such a step is a floor rather than a measurement.
  */
 const MAX_IN_FLIGHT = Number(argOf('max-in-flight', '4000'));
+/**
+ * Cold start, measured by the orchestrator (it owns the restart) and passed in, so the three
+ * numbers the run lifecycle wants — cold, warm, hot — all land in one record. Only reporting
+ * the hot number hides how long a system takes to become useful.
+ */
+const COLD_MS = argOf('cold-ms', null);
 
 /** Resident CPU time of the target process, so per-step CPU can be attributed. */
 async function targetCpuSeconds(pid) {
@@ -269,7 +275,11 @@ await writeFile(
 				target: BASE_URL,
 				dataset: { scale: manifest.scale, seed: manifest.seed, generatorVersion: manifest.generatorVersion, files: manifest.files },
 				host: { cpus: cpus().length, model: cpus()[0]?.model, totalmemGiB: +(totalmem() / 1024 ** 3).toFixed(1), platform: platform(), release: release() },
-				harness: { quoteShare: QUOTE_SHARE, writeRate: WRITE_RATE, durationSeconds: DURATION, warmupSeconds: WARMUP },
+				harness: { quoteShare: QUOTE_SHARE, writeRate: WRITE_RATE, durationSeconds: DURATION, warmupSeconds: WARMUP, maxInFlight: MAX_IN_FLIGHT },
+			lifecycle: {
+				coldStartMs: COLD_MS === null ? null : Number(COLD_MS),
+				warmupFirstResponseMs: warm.samples[0]?.ms ?? null,
+			},
 				caveats: [
 					'CPU clock NOT pinned — no cycle-normalized efficiency figure may be derived from this run.',
 					'Generator shares a host with the target; see generatorCpuLoad per step.',

@@ -20,3 +20,10 @@ out/
 
 # Harness output — raw samples are retained per run, not committed.
 bench/results/
+
+# Expanded benchmark dataset — regenerate with scripts/prepare-dataset.mjs
+.work/
+containers/.snapshots/
+
+# Local container test credentials
+containers/.env

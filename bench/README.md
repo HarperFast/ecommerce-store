@@ -4,15 +4,26 @@ The load harness for this implementation, standalone. It drives the specificatio
 
 ## Running
 
-Harper must be up with the dataset loaded:
+The supported path is containerized — see [`containers/README.md`](../containers/README.md), which fixes the resource budget, the networking mode, and the run lifecycle:
 
 ```bash
-node scripts/load-dataset.mjs
+SCALE=dev ./containers/run-benchmark.sh
 ```
 
+Directly against a local Harper, for iteration only:
+
 ```bash
-node bench/run.mjs --rates 400,800,1200,1600,2400 --duration 12
+node scripts/load-dataset.mjs --scale dev && node bench/run.mjs --rates 400,800,1600 --duration 12
 ```
+
+## Datasets
+
+| Scale | Rows | Stored | Use |
+|---|---|---|---|
+| `dev` | 46,583 | raw, committed | Local iteration. Loads in under 2s. **Never a benchmark target** — it fits entirely in memory, which is the one thing the benchmark dataset must not do. |
+| `bench` | 40,656,446 | gzipped, committed | The benchmark. ~4.5 GB expanded, against a 2 GiB container. |
+
+`bench` is committed compressed; `node scripts/prepare-dataset.mjs --scale bench` expands and verifies it. Checksums are always over the **uncompressed** bytes — dataset identity is about the data, not the transport.
 
 Each step writes raw per-request samples to `bench/results/run-<timestamp>.json`, alongside the exact run conditions: dataset scale, seed and per-file checksums, host, harness settings, and the caveats that apply to that run.
 

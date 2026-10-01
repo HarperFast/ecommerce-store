@@ -12,6 +12,8 @@ node_modules/
 # deploy payload: it is ~800 MB and is loaded separately via the operations API, outside the
 # measured run. See scripts/load-dataset.mjs.
 dataset/
+containers/
+.work/
 
 # Harness output and the harness itself are not part of the application.
 bench/

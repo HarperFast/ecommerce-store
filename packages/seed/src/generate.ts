@@ -28,11 +28,15 @@ export interface Scale {
  * result (docs/seed-design.md).
  */
 export const SCALES: Record<string, Scale> = {
-	dev: { products: 500, customers: 1_000, carts: 500, locationsPerRegion: 2, promotions: 40 },
+	// Committed uncompressed and deliberately tiny: agents and humans need a catalog they can
+	// load in seconds to work on the application. NEVER a benchmark target.
+	dev: { products: 2_000, customers: 4_000, carts: 2_000, locationsPerRegion: 2, promotions: 80 },
 	// Sized so the working set does NOT fit in memory on the benchmark container — DATA-004.
-	// ~7.2M rows, ~900 MB on disk. The whole point is that Harper cannot win by holding
-	// everything in RAM, so this number is a requirement, not a convenience.
-	bench: { products: 500_000, customers: 200_000, carts: 100_000, locationsPerRegion: 2, promotions: 2_000 },
+	// The container is pinned at 2 GiB (see containers/), and Harper's on-disk footprint with
+	// indexes runs well above the raw NDJSON size, so ~3.2 GB raw clears 2 GiB with room to
+	// spare. That Harper cannot hold the catalog in RAM is the requirement, not a side effect.
+	// Committed GZIPPED; scripts/prepare-dataset.mjs expands it.
+	bench: { products: 2_000_000, customers: 500_000, carts: 300_000, locationsPerRegion: 2, promotions: 5_000 },
 };
 
 const pad = (n: number, width = 6) => String(n).padStart(width, '0');

@@ -8,6 +8,7 @@
  * re-derives it — see docs/seed-design.md for why.
  */
 import { createWriteStream } from 'node:fs';
+import { createGzip } from 'node:zlib';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
@@ -30,7 +31,12 @@ function canonical(value: unknown): string {
 	return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonical(v)}`).join(',')}}`;
 }
 
-async function writeTable(dir: string, table: Table, rows: Iterable<Record<string, unknown>>) {
+/**
+ * The checksum is always over the UNCOMPRESSED bytes. That is what dataset identity means —
+ * two implementations must agree on the data, not on how it was transported — so a change of
+ * compression must never change the contract.
+ */
+async function writeTable(dir: string, table: Table, rows: Iterable<Record<string, unknown>>, compress: boolean) {
 	const hash = createHash('sha256');
 	let count = 0;
 	const lines = (function* () {
@@ -41,7 +47,11 @@ async function writeTable(dir: string, table: Table, rows: Iterable<Record<strin
 			yield line;
 		}
 	})();
-	await pipeline(Readable.from(lines, { objectMode: false }), createWriteStream(join(dir, `${table}.ndjson`)));
+	const name = compress ? `${table}.ndjson.gz` : `${table}.ndjson`;
+	const stages: any[] = [Readable.from(lines, { objectMode: false })];
+	if (compress) stages.push(createGzip({ level: 9 }));
+	stages.push(createWriteStream(join(dir, name)));
+	await pipeline(stages as [any, ...any[]]);
 	return { sha256: hash.digest('hex'), rows: count };
 }
 
@@ -52,8 +62,11 @@ const argOf = (name: string, fallback: string) => {
 };
 
 const scaleName = argOf('scale', 'dev');
+// The benchmark dataset is committed gzipped — it is large enough that storing it raw is
+// hostile to anyone cloning. scripts/prepare-dataset.mjs expands it before a run.
+const compress = args.includes('--gzip') || scaleName === 'bench';
 const seed = argOf('seed', 'harper-ecommerce-store-v1');
-const outDir = resolve(argOf('out', join(import.meta.dirname, '..', '..', '..', 'dataset')));
+const outDir = resolve(argOf('out', join(import.meta.dirname, '..', '..', '..', 'dataset', scaleName)));
 
 const scale = SCALES[scaleName];
 if (!scale) throw new Error(`Unknown scale "${scaleName}". Known: ${Object.keys(SCALES).join(', ')}`);
@@ -68,20 +81,21 @@ const counts = variantShape(scale, shapeRng);
 const started = process.hrtime.bigint();
 const files = {} as DatasetManifest['files'];
 
-files.location = await writeTable(outDir, 'location', locations(scale));
-files.customer = await writeTable(outDir, 'customer', customers(scale, new Rng(`${seed}:customer`)));
-files.product = await writeTable(outDir, 'product', products(scale, counts, new Rng(`${seed}:product`)));
-files.variant = await writeTable(outDir, 'variant', variants(scale, counts, new Rng(`${seed}:variant`)));
-files.inventory = await writeTable(outDir, 'inventory', inventory(scale, counts, new Rng(`${seed}:inventory`)));
-files.promotion = await writeTable(outDir, 'promotion', promotions(scale, new Rng(`${seed}:promotion`)));
-files.rate = await writeTable(outDir, 'rate', rates());
-files.cart = await writeTable(outDir, 'cart', carts(scale, counts, new Rng(`${seed}:cart`)));
+files.location = await writeTable(outDir, 'location', locations(scale), compress);
+files.customer = await writeTable(outDir, 'customer', customers(scale, new Rng(`${seed}:customer`)), compress);
+files.product = await writeTable(outDir, 'product', products(scale, counts, new Rng(`${seed}:product`)), compress);
+files.variant = await writeTable(outDir, 'variant', variants(scale, counts, new Rng(`${seed}:variant`)), compress);
+files.inventory = await writeTable(outDir, 'inventory', inventory(scale, counts, new Rng(`${seed}:inventory`)), compress);
+files.promotion = await writeTable(outDir, 'promotion', promotions(scale, new Rng(`${seed}:promotion`)), compress);
+files.rate = await writeTable(outDir, 'rate', rates(), compress);
+files.cart = await writeTable(outDir, 'cart', carts(scale, counts, new Rng(`${seed}:cart`)), compress);
 
 const manifest: DatasetManifest = {
 	specVersion: '0.2.0-draft',
 	generatorVersion: GENERATOR_VERSION,
 	scale: scaleName,
 	seed,
+	compressed: compress,
 	files,
 	distributions: {
 		variantsPerProduct: 'long-tailed, 1-20',

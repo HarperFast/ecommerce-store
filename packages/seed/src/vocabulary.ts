@@ -53,7 +53,12 @@ export const CART_SIZE: readonly (readonly [number, number])[] = [
 	[1, 22], [2, 24], [3, 18], [4, 12], [5, 8], [7, 7], [10, 5], [15, 3], [25, 1],
 ];
 
-/** How many of the locations stock a given sku. Not all, so priority resolution does work. */
+/**
+ * How many of the 8 locations stock a given sku. Not all — priority resolution has to do real
+ * work — but weighted high enough that a customer's own region usually can fulfil a line.
+ * The earlier distribution left ~2 locations per region unable to satisfy common quotes,
+ * which made shortfalls the normal case rather than the interesting one.
+ */
 export const LOCATIONS_PER_SKU: readonly (readonly [number, number])[] = [
-	[1, 20], [2, 30], [3, 28], [4, 15], [6, 7],
+	[2, 8], [3, 14], [4, 22], [5, 24], [6, 18], [7, 10], [8, 4],
 ];
