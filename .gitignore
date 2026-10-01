@@ -27,3 +27,7 @@ containers/.snapshots/
 
 # Local container test credentials
 containers/.env
+
+# Playwright run output
+e2e/test-results/
+e2e/playwright-report/

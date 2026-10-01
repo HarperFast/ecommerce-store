@@ -1,0 +1,50 @@
+name: Dataset integrity
+
+# The ONLY workflow that pulls Git LFS.
+#
+# The benchmark dataset is ~329 MB and every pull is billed against the org's LFS bandwidth
+# allowance, so this runs only when the dataset itself changes — which should be rare, since
+# it is a pinned contract rather than a working file — or when someone asks for it.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'dataset/bench/**'
+      - 'packages/seed/**'
+  pull_request:
+    paths:
+      - 'dataset/bench/**'
+      - 'packages/seed/**'
+  workflow_dispatch:
+
+concurrency:
+  group: dataset-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Benchmark dataset checksums
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      # Expands ~4.5 GB and verifies every table's SHA-256 against MANIFEST.json. The
+      # checksums are over the UNCOMPRESSED bytes, so this checks the thing the contract is
+      # actually about rather than the transport.
+      - name: Expand and verify
+        run: node scripts/prepare-dataset.mjs --scale bench
+
+      - name: Report sizes
+        run: |
+          {
+            echo "### Benchmark dataset"
+            echo '```'
+            du -sh dataset/bench .work/dataset/bench
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

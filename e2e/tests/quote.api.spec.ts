@@ -32,8 +32,34 @@ test.describe('cart quote', () => {
 
 	// The ground-truth correctness guard the measurement rules require: a throughput-only
 	// benchmark would report a silently wrong quote as a result.
-	test.fixme(covers('QUOTE-008')('the same cart and dataset state produce a byte-identical quote'), async () => {});
+	test(covers('QUOTE-008')('the same cart and dataset state produce a byte-identical quote'), async ({ request }) => {
+		const url = API.quote('cart-000042');
+		const first = await request.post(url, { data: {} });
+		const second = await request.post(url, { data: {} });
+		expect(first.status()).toBe(200);
+		expect(second.status()).toBe(200);
+		// Byte-identical, not deep-equal: key order is part of the contract, because a
+		// response that reorders between identical requests cannot be cached or diffed.
+		expect(await second.text()).toBe(await first.text());
+	});
 
-	test.fixme(covers('QUOTE-009')('an unknown cart id returns 404'), async () => {});
-	test.fixme(covers('QUOTE-010')('the response itemizes per line and at cart level'), async () => {});
+	test(covers('QUOTE-009')('an unknown cart id returns 404'), async ({ request }) => {
+		const response = await request.post(API.quote('no-such-cart'), { data: {} });
+		expect(response.status()).toBe(404);
+	});
+
+	test(covers('QUOTE-010')('the response itemizes per line and at cart level'), async ({ request }) => {
+		const body = await (await request.post(API.quote('cart-000042'), { data: {} })).json();
+		expect(body).toMatchObject({ cartId: 'cart-000042', currency: 'USD' });
+		for (const field of ['subtotal', 'discountTotal', 'shipping', 'tax', 'grandTotal']) {
+			expect(Number.isInteger(body[field]), `${field} must be integer minor units`).toBe(true);
+		}
+		expect(body.lines.length).toBeGreaterThan(0);
+		for (const line of body.lines) {
+			expect(Number.isInteger(line.unitPrice)).toBe(true);
+			expect(Number.isInteger(line.lineTotal)).toBe(true);
+			expect(Array.isArray(line.appliedPromotionIds)).toBe(true);
+		}
+		expect(body.grandTotal).toBe(body.subtotal - body.discountTotal + body.shipping + body.tax);
+	});
 });

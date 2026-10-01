@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Never materialize Git LFS objects in CI.
+  #
+  # The benchmark dataset is ~329 MB and every pull is billed against the org's LFS bandwidth
+  # allowance. Nothing in this workflow needs it: the conformance suite runs against the
+  # `dev` dataset, which is plain git on purpose. Only .github/workflows/dataset.yml pulls
+  # LFS, and only when the benchmark dataset actually changes.
+  GIT_LFS_SKIP_SMUDGE: 1
+  NODE_VERSION: "24"
+
+jobs:
+  checks:
+    name: Spec and repo checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # `npm install`, not `npm ci`: the lock file resolves platform-specific optional peers
+      # differently across platforms, and this is also the install Harper's own deploy path
+      # runs.
+      - run: npm install --no-audit --no-fund
+
+      - name: SPEC.md agrees with the requirement registry
+        run: npm run check:spec
+
+      - name: Every MUST has a test
+        run: npm run check:coverage
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Nothing dev-only reaches a deployed node
+        run: npm run check:deploy
+
+      - name: The dev dataset matches its manifest
+        run: node scripts/prepare-dataset.mjs --scale dev --out dataset/dev
+
+  conformance:
+    name: Conformance (dev dataset)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - run: npm install --no-audit --no-fund
+
+      # Pinned from package.json so there is ONE source of truth for the platform version.
+      # `npx harper` would silently fetch whatever is newest — a drift that produced a
+      # container running 5.3.0 against local development on 5.2.12.
+      - name: Install Harper (pinned)
+        run: |
+          version=$(node -p "require('./package.json').devDependencies.harper")
+          npm install -g --no-audit --no-fund "harper@${version}"
+          installed=$(node -p "require('/usr/local/lib/node_modules/harper/package.json').version")
+          [ "$installed" = "$version" ] || { echo "harper version drift: $installed != $version"; exit 1; }
+          echo "harper $installed"
+
+      - name: Start Harper
+        env:
+          # All THREE are required for a non-interactive install — Harper's installer checks
+          # for exactly this set (components: hasRequiredPromptOverrides) and falls back to
+          # prompting for whichever is missing, which hangs a runner until it times out.
+          # ROOTPATH alone crashes with ERR_INVALID_ARG_TYPE; HOME alone still prompts for
+          # the destination. Verified locally before being written here.
+          HOME: ${{ runner.temp }}/harper-home
+          ROOTPATH: ${{ runner.temp }}/harper-home/harper
+          HDB_ADMIN_USERNAME: ci
+          # Plain HTTP: outside dev mode Harper defaults to HTTPS, and TLS has nothing to do
+          # with what the conformance suite asserts.
+          HARPER_SET_CONFIG: '{"threads":2,"logging":{"level":"warn"},"http":{"port":9926,"securePort":null},"operationsApi":{"network":{"port":9925,"securePort":null}}}'
+        run: |
+          mkdir -p "$HOME"
+          HDB_ADMIN_PASSWORD=$(node -e "console.log(require('node:crypto').randomBytes(18).toString('base64url'))")
+          echo "HDB_ADMIN_PASSWORD=$HDB_ADMIN_PASSWORD" >> "$GITHUB_ENV"
+          echo "HDB_ADMIN_USERNAME=ci" >> "$GITHUB_ENV"
+          HDB_ADMIN_PASSWORD="$HDB_ADMIN_PASSWORD" nohup harper run . > "${{ runner.temp }}/harper.log" 2>&1 &
+          for _ in $(seq 1 60); do
+            curl -fsS -o /dev/null "http://localhost:9926/product/product-000000?tier=standard&region=us-east" && break
+            # A 404 means Harper is up and the data simply is not loaded yet.
+            code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:9926/product/product-000000?tier=standard&region=us-east" || true)
+            [ "$code" = "404" ] && break
+            sleep 2
+          done
+          curl -s -o /dev/null -w 'harper http: %{http_code}\n' "http://localhost:9926/product/product-000000?tier=standard&region=us-east"
+
+      - name: Load the dev dataset
+        run: node scripts/load-dataset.mjs --scale dev --url http://localhost:9925
+
+      - name: Install conformance suite
+        # --ignore-scripts skips the Playwright browser download: the suite's only project is
+        # `api`, which drives HTTP directly and never launches a browser.
+        run: npm install --prefix e2e --ignore-scripts --no-audit --no-fund
+
+      - name: Run conformance suite
+        env:
+          BASE_URL: http://localhost:9926
+        run: npm run test --prefix e2e
+
+      - name: Harper log
+        if: failure()
+        run: tail -100 "${{ runner.temp }}/harper.log" || true
