@@ -88,7 +88,7 @@ The write-shaped read path, and the primary endpoint under test. Prices a cart.
 - `QUOTE-002` **MUST** — Each line resolves its product and variant. A line naming an unknown sku fails the quote with `400`; it is not silently dropped.
 - `QUOTE-003` **MUST** — Availability per line is resolved against inventory across fulfillment locations, honouring location priority.
 - `QUOTE-004` **MUST** — The customer's tier and loyalty balance are read and applied.
-- `QUOTE-005` **MUST** — Promotions are resolved by tier, SKU, and category, and evaluated in application code: **stacking, exclusivity, threshold, and BOGO** rules. Evaluation order is specified (below) so every implementation produces identical totals.
+- `QUOTE-005` **MUST** — Promotions are resolved by tier, SKU, and category — **including promotions unrestricted on any of those dimensions** — and evaluated in application code: **stacking, exclusivity, threshold, and BOGO** rules. Evaluation order is specified (below) so every implementation produces identical totals.
 - `QUOTE-006` **MUST** — Shipping is resolved by region and total cart weight.
 - `QUOTE-007` **MUST** — Tax is resolved by the customer's jurisdiction and applied to the post-discount subtotal.
 - `QUOTE-008` **MUST** — The quote is **deterministic**: the same cart against the same dataset state produces a byte-identical response. This is what makes the endpoint verifiable at all, and it is the ground-truth correctness guard the measurement rules require.
@@ -99,14 +99,25 @@ The write-shaped read path, and the primary endpoint under test. Prices a cart.
 
 Normative, because promotion stacking is order-dependent and an unspecified order makes two correct implementations disagree on the total — which the measurement rules classify as non-equivalent semantics, an invalid cell rather than a close one.
 
-1. Candidate promotions are collected by tier, then SKU, then category.
-2. **Exclusive** promotions are evaluated first. The highest-value exclusive wins; if one applies, no other promotion applies.
-3. Otherwise, **threshold** promotions are evaluated against the pre-discount subtotal.
-4. Then **BOGO**, applied to the lowest-priced qualifying unit.
-5. Then remaining **stackable** promotions, in ascending promotion id.
+> **Each promotion applies at most once**, however many lines it is eligible for. This is the rule that decides most of the rest; an earlier draft left it implicit and a cart-wide 34%-off promotion eligible for three lines priced the cart to zero, as a well-formed deterministic 200.
+
+Promotions are either **cart-wide** (`exclusive`, `threshold`) or **per-line** (`bogo`, `stackable`). The two draw on separate budgets: cart-wide discounts accumulate against the subtotal, per-line discounts draw down that line's remaining amount. Neither may take a line or the cart below zero.
+
+1. Candidate promotions are collected by tier, SKU, and category. **A promotion unrestricted on a dimension (an empty array) is eligible on that dimension**, so a promotion unrestricted on every dimension is eligible for every line — collection must return it.
+2. **Exclusive** — cart-wide, evaluated against the subtotal. The highest-value one wins; if one applies, **no other promotion applies at all**. Attributed to every line it was eligible for.
+3. Otherwise **threshold** — cart-wide, each eligible promotion applied **once**, against the **pre-discount** subtotal, if the subtotal meets its threshold. Attributed to every line it was eligible for.
+4. Then **BOGO** — each eligible promotion applied **once**, to the single lowest-priced qualifying unit among the lines it is eligible for, where a qualifying line has quantity ≥ 2 and a non-zero remaining amount. Ties break on ascending SKU, so the result does not depend on cart line order.
+5. Then **stackable** — each eligible promotion applied **once per eligible line**, against that line's **remaining** amount, so successive percentage discounts compound rather than all computing against the gross line total.
 6. Ties at any step break on ascending promotion id.
+7. **At most three stackable promotions apply to any one line**, in ascending promotion id.
+8. **`discountTotal` never exceeds 60% of the subtotal.** The cap is applied last, so it bounds every path including a single large exclusive.
+
+Steps 7 and 8 are normative bounds, not tuning: real stores limit stacking, and without a bound a promotion corpus with enough unrestricted stackables compounds a cart to zero.
 
 Rounding: each discount rounds half-up to the minor unit at the point it is applied, not at the end.
+
+- `QUOTE-011` **MUST** — No promotion is applied more than once, and `discountTotal` never exceeds 60% of the subtotal.
+- `QUOTE-012` **MUST** — `appliedPromotionIds` lists exactly the promotions that produced a discount for that line. A cart-wide promotion appears on every line it was eligible for.
 
 ---
 

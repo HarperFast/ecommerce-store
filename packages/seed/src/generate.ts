@@ -30,7 +30,7 @@ export interface Scale {
 export const SCALES: Record<string, Scale> = {
 	// Committed uncompressed and deliberately tiny: agents and humans need a catalog they can
 	// load in seconds to work on the application. NEVER a benchmark target.
-	dev: { products: 2_000, customers: 4_000, carts: 2_000, locationsPerRegion: 2, promotions: 80 },
+	dev: { products: 2_000, customers: 4_000, carts: 2_000, locationsPerRegion: 2, promotions: 160 },
 	// Sized so the working set does NOT fit in memory on the benchmark container — DATA-004.
 	// The container is pinned at 2 GiB (see containers/), and Harper's on-disk footprint with
 	// indexes runs well above the raw NDJSON size, so ~3.2 GB raw clears 2 GiB with room to
@@ -149,12 +149,27 @@ export function* inventory(scale: Scale, counts: number[], rng: Rng): Generator<
 
 export function* promotions(scale: Scale, rng: Rng): Generator<Record<string, unknown>> {
 	for (let i = 0; i < scale.promotions; i++) {
-		const kind = rng.weighted([['stackable', 50], ['threshold', 25], ['bogo', 15], ['exclusive', 10]] as const);
-		const byCategory = rng.chance(0.6);
+		// Exclusives short-circuit everything, so they stay genuinely rare: at 8% they reached
+		// 78% of carts, because a category-scoped exclusive matches any cart containing that
+		// category and carts span several.
+		const kind = rng.weighted([['stackable', 46], ['threshold', 26], ['bogo', 25], ['exclusive', 3]] as const);
+
+		// Exclusive promotions SHORT-CIRCUIT the whole evaluation: if one applies, nothing else
+		// does. An earlier corpus gave every tier unrestricted exclusives, so every non-empty
+		// cart took that branch and threshold, BOGO and stackable were never evaluated at all —
+		// three of the four advertised pricing phases absent from the measured path. Exclusives
+		// are therefore rare AND always narrowly scoped.
+		// Exclusives are scoped by CATEGORY only, not category AND tier. Doubly-restricting them
+		// made them unreachable: a sweep of 150 dev carts applied zero exclusives and zero
+		// BOGOs, so two of the four pricing phases were dead in the workload. A phase that
+		// never fires is a phase the benchmark does not measure, which is the same defect as
+		// exclusives firing on everything — just in the other direction.
+		const narrow = kind === 'exclusive';
+		const byCategory = narrow || rng.chance(0.55);
 		const row: Record<string, unknown> = {
 			id: `promo-${pad(i, 4)}`,
 			kind,
-			tiers: rng.chance(0.5) ? [rng.pick(TIERS)] : [],
+			tiers: narrow ? [] : rng.chance(0.5) ? [rng.pick(TIERS)] : [],
 			skus: [],
 			categoryIds: byCategory ? [rng.pick(CATEGORIES)] : [],
 			thresholdMinor: kind === 'threshold' ? rng.int(5_000, 40_000) : 0,
@@ -163,10 +178,14 @@ export function* promotions(scale: Scale, rng: Rng): Generator<Record<string, un
 		};
 		if (kind === 'bogo') {
 			row.amountBasisPoints = 10000; // the free unit
-		} else if (rng.chance(0.6)) {
-			row.amountBasisPoints = rng.int(500, 3000);
+		} else if (rng.chance(0.75)) {
+			row.amountBasisPoints = rng.int(500, 2_500);
 		} else {
-			row.amountMinor = rng.int(200, 5_000);
+			// Fixed-amount promotions carry a MINIMUM SPEND. Without one, a 1,644-minor discount
+			// landed on a 1,325-minor cart and priced it to zero — the engine capping at the
+			// subtotal correctly, against data no real store would publish.
+			row.amountMinor = rng.int(200, 3_000);
+			row.thresholdMinor = (row.amountMinor as number) * rng.int(4, 10);
 		}
 		yield row;
 	}

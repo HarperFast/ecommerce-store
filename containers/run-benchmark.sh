@@ -53,7 +53,12 @@ say "loading dataset ($SCALE) — not measured"
 # --- snapshot, so trials start from identical state ---------------------------------------
 say "snapshotting loaded state for trial restore"
 $COMPOSE stop harper >/dev/null
-$COMPOSE run --rm --no-deps -v harper-data:/data -v "$PWD/.snapshots:/snap" harper \
+# NO `-v harper-data:/data` here: that names an UNSCOPED docker volume, while the service
+# uses the compose-project-scoped `harper-ecommerce-bench_harper-data`. The explicit mount
+# replaced the service's own, so the snapshot archived an empty volume and the restore
+# restored it — leaving the target's mutated state to survive between trials, which is the
+# exact thing the snapshot exists to prevent.
+$COMPOSE run --rm --no-deps -v "$PWD/.snapshots:/snap" harper \
   bash -c "tar -C /data -czf /snap/${SCALE}.tar.gz ." >/dev/null
 $COMPOSE up -d harper
 
@@ -61,7 +66,7 @@ for trial in $(seq 1 "$TRIALS"); do
   if [ "$trial" -gt 1 ]; then
     say "restoring snapshot for trial $trial"
     $COMPOSE stop harper >/dev/null
-    $COMPOSE run --rm --no-deps -v harper-data:/data -v "$PWD/.snapshots:/snap" harper \
+    $COMPOSE run --rm --no-deps -v "$PWD/.snapshots:/snap" harper \
       bash -c "rm -rf /data/* && tar -C /data -xzf /snap/${SCALE}.tar.gz" >/dev/null
     $COMPOSE up -d harper
     sleep 10

@@ -41,6 +41,14 @@ Containerization is not a neutral wrapper. Each of these changes the number, so 
 
 Cold, warm and hot are three different numbers and all three land in the run record. Only reporting the hot number hides how long a system takes to become useful.
 
+## A trap worth knowing
+
+`docker compose up` does **not** rebuild. Application code is `COPY`ed at image build time, so a `down -v && up -d` cycle silently runs the previous build — and the symptom is a behaviour change that does not appear, which reads as "my fix did not work" rather than "my fix was not deployed". `run-benchmark.sh` always builds; a manual cycle must too:
+
+```bash
+docker compose -f containers/compose.yaml build harper
+```
+
 ## Known gaps
 
 - **CPU clock is not pinned.** No cycle-normalized efficiency figure (ops per CPU-gigacycle) may be derived from any run produced here.

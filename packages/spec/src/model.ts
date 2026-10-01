@@ -126,7 +126,8 @@ export interface ProductAggregate {
 	availability: Record<string, number>;
 	/** Per sku, resolved for the requested tier. */
 	resolvedPrice: Record<string, Minor>;
-	related: Product[];
+	/** Abbreviated on purpose — enough to render a related-items strip without a further request (PDP-005). */
+	related: Pick<Product, 'id' | 'title' | 'reviewRollup'>[];
 	tier: string;
 	region: string;
 }

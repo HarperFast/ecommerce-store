@@ -94,7 +94,11 @@ for (const table of TABLES) {
 
 	const flush = async () => {
 		if (!batch.length) return;
-		await operation({ operation: 'insert', database: DATABASE, table: TABLE_NAME[table], records: batch });
+		// `upsert`, not `insert`. Insert leaves an existing row untouched, so reloading a
+		// regenerated dataset over a populated instance silently kept stale records — the
+		// instance then held a MIX of two dataset versions while reporting a clean load, which
+		// is exactly the class of silent misconfiguration the measurement rules warn about.
+		await operation({ operation: 'upsert', database: DATABASE, table: TABLE_NAME[table], records: batch });
 		loaded += batch.length;
 		batch = [];
 		process.stdout.write(`\r  ${table.padEnd(10)} ${String(loaded).padStart(9)} / ${manifest.files[table].rows}`);

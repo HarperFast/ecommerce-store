@@ -20,6 +20,45 @@ test.describe('cart quote', () => {
 		expect(response.status()).toBe(400);
 	});
 
+	// Sweeps a spread of carts rather than one: the defect these guard against was a cart-wide
+	// promotion applied once per eligible line, which only shows on multi-line carts where that
+	// promotion happens to be eligible. A single fixture would have missed it.
+	test(covers('QUOTE-011')('no discount exceeds the subtotal, across many carts'), async ({ request }) => {
+		const ids = Array.from({ length: 40 }, (_, i) => `cart-${String(i * 47).padStart(6, '0')}`);
+		const offenders: string[] = [];
+		for (const id of ids) {
+			const response = await request.post(API.quote(id), { data: {} });
+			if (response.status() === 404) continue;
+			const body = await response.json();
+			const lineSum = body.lines.reduce((sum: number, l: { lineTotal: number }) => sum + l.lineTotal, 0);
+			if (body.discountTotal > body.subtotal || body.discountTotal < 0 || body.subtotal !== lineSum) {
+				offenders.push(`${id}: subtotal=${body.subtotal} lineSum=${lineSum} discount=${body.discountTotal}`);
+			}
+		}
+		expect(offenders, 'carts violating the discount invariant').toEqual([]);
+	});
+
+	test(covers('QUOTE-012')('applied promotion ids are unique per line and only cited when they discounted'), async ({ request }) => {
+		const ids = Array.from({ length: 40 }, (_, i) => `cart-${String(i * 47).padStart(6, '0')}`);
+		const offenders: string[] = [];
+		for (const id of ids) {
+			const response = await request.post(API.quote(id), { data: {} });
+			if (response.status() === 404) continue;
+			const body = await response.json();
+			for (const line of body.lines) {
+				const ids2: string[] = line.appliedPromotionIds;
+				// A promotion listed twice on one line is the double-application signature.
+				if (new Set(ids2).size !== ids2.length) offenders.push(`${id}/${line.sku}: duplicate ids ${ids2.join(',')}`);
+			}
+			// Promotions cited anywhere imply a discount, and a discount implies a citation.
+			const cited = body.lines.some((l: { appliedPromotionIds: string[] }) => l.appliedPromotionIds.length > 0);
+			if (cited !== body.discountTotal > 0) {
+				offenders.push(`${id}: cited=${cited} but discountTotal=${body.discountTotal}`);
+			}
+		}
+		expect(offenders, 'carts violating promotion attribution').toEqual([]);
+	});
+
 	test.fixme(covers('QUOTE-003')('availability resolves across locations by priority'), async () => {});
 	test.fixme(covers('QUOTE-004')('customer tier and loyalty balance are applied'), async () => {});
 

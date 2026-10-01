@@ -74,6 +74,11 @@ services:
     environment:
       TARGET_URL: http://harper:9926
       OPS_URL: http://harper:9925
+      # The background write stream authenticates against the operations API. Without these
+      # every write 401s, fetch resolves normally, and the SPEC.md §6 coherence workload
+      # silently does not happen while the run record still reports writesIssued.
+      HDB_ADMIN_USERNAME: ${HDB_ADMIN_USERNAME:-benchadmin}
+      HDB_ADMIN_PASSWORD: ${HDB_ADMIN_PASSWORD:?set in containers/.env}
     deploy:
       resources:
         limits:

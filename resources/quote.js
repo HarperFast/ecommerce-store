@@ -24,6 +24,11 @@ async function loadStatic() {
 	locations.sort((a, b) => a.priority - b.priority);
 	const rates = [];
 	for await (const row of Rate.search({})) rates.push(row);
+	// Sorted: resolveShipping/resolveTax return the FIRST matching row, and a scan's order is
+	// not guaranteed across restarts or replicas. Unsorted, a cart at a weight-band boundary
+	// could price differently on two nodes holding identical data — a QUOTE-008 violation
+	// that would look like a caching bug.
+	rates.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 	staticTables = { locations, rates };
 	return staticTables;
 }
@@ -106,8 +111,7 @@ export class quote extends Resource {
 		}));
 		const subtotal = lines.reduce((sum, l) => sum + l.unitPrice * l.quantity, 0);
 
-		const categoryIds = [...new Set(lines.flatMap((l) => l.categoryIds))];
-		const candidateRows = await collectPromotions(customer.tier, categoryIds);
+		const candidateRows = await collectPromotions();
 		const candidates = [];
 		for (const line of lines) {
 			for (const promotion of candidateRows) {
@@ -148,20 +152,22 @@ export class quote extends Resource {
 }
 
 /**
- * Candidate promotions by tier and by category. Two indexed probes rather than a scan.
- * Whether this beats one denormalized eligibility key is a measurement, not a guess — see
- * the open question in docs/data-model.md.
+ * Candidate promotions.
+ *
+ * CORRECTNESS FIRST, deliberately. This was two indexed probes — one on `tiers`, one per
+ * category — which could never return a promotion that is unrestricted on BOTH dimensions,
+ * even though an empty array means "no restriction" and such a promotion is eligible for
+ * every line (SPEC.md §4). 14% of the committed promotion corpus was unreachable, and it was
+ * exactly the globally-applicable 14%. The probes also inserted rows into a Map in I/O
+ * completion order, so `candidateRows` ordering varied between identical requests.
+ *
+ * An index that can express "matches X or is unrestricted" is the obvious optimization and
+ * is tracked in docs/data-model.md. It must preserve completeness, including unrestricted
+ * rows, and must return a deterministic order. Until it exists, this scans and sorts: a
+ * complete slow answer beats a fast wrong one in a reference implementation.
  */
-async function collectPromotions(tier, categoryIds) {
-	const seen = new Map();
-	const queries = [Promotion.search({ conditions: [{ attribute: 'tiers', value: tier }] })];
-	for (const categoryId of categoryIds) {
-		queries.push(Promotion.search({ conditions: [{ attribute: 'categoryIds', value: categoryId }] }));
-	}
-	await Promise.all(
-		queries.map(async (query) => {
-			for await (const row of query) seen.set(row.id, row);
-		})
-	);
-	return [...seen.values()];
+async function collectPromotions() {
+	const rows = [];
+	for await (const row of Promotion.search({})) rows.push(row);
+	return rows.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 }
