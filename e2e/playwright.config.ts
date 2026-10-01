@@ -1,16 +1,13 @@
-import { defineConfig, devices } from '@playwright/test';
+import { defineConfig } from '@playwright/test';
 
 /**
  * The executable form of SPEC.md.
  *
- * This suite runs against ANY implementation via BASE_URL — Harper, Vercel, Supabase — so
- * it must never import platform code or assume a mechanism. It asserts the behaviors in
- * SPEC.md and nothing else.
+ * Runs against ANY implementation via BASE_URL — Harper, or an assembled stack — so it must
+ * never import stack code or assume a mechanism. It asserts the behaviors in SPEC.md and
+ * nothing else.
  *
- *   BASE_URL=http://localhost:9926 PROFILE=APP npx playwright test
- *
- * PROFILE selects which requirements apply (SPEC.md §2): DATA for backend-only
- * implementations, APP for full-stack ones.
+ *   BASE_URL=http://localhost:9926 npx playwright test
  */
 const BASE_URL = process.env.BASE_URL ?? 'http://localhost:9926';
 
@@ -26,8 +23,7 @@ export default defineConfig({
 		// Never record a measurement from this suite. It verifies conformance; benchmarks
 		// live in bench/ and are run separately under controlled conditions.
 	},
-	projects: [
-		{ name: 'api', testMatch: /.*\.api\.spec\.ts/ },
-		{ name: 'pages', testMatch: /.*\.page\.spec\.ts/, use: { ...devices['Desktop Chrome'] } },
-	],
+	// P0 is two JSON endpoints; there are no pages to drive. A browser project returns with
+	// the storefront UI — see docs/future-work.md.
+	projects: [{ name: 'api', testMatch: /.*\.api\.spec\.ts/ }],
 });

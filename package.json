@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Harper Ecommerce Store \u2014 the golden reference implementation of a Harper-native ecommerce catalog.",
+  "description": "Harper Ecommerce Store \u2014 the golden reference implementation for the Harper application architecture benchmarks.",
   "license": "MIT",
   "workspaces": [
     "packages/*"
@@ -13,30 +13,22 @@
   },
   "scripts": {
     "dev": "harper dev .",
-    "build": "next build",
     "start": "harper run .",
-    "seed": "node --run seed --workspace @ecommerce-store/seed",
-    "test:e2e": "npm test --prefix e2e",
+    "seed": "npm run seed --workspace @ecommerce-store/seed",
     "typecheck": "tsc --build",
+    "test:e2e": "npm test --prefix e2e",
     "check": "npm run check:spec && npm run check:coverage && npm run typecheck && npm run check:deploy",
     "check:spec": "node scripts/check-spec-sync.mjs",
     "check:coverage": "npm run coverage --prefix e2e",
-    "check:deploy": "./scripts/verify-deploy.sh",
-    "measure:kdf": "node scripts/measure-kdf.mjs"
+    "check:deploy": "./scripts/verify-deploy.sh"
   },
   "dependencies": {
-    "@ecommerce-store/spec": "*",
-    "@ecommerce-store/ui": "*",
-    "@harperfast/nextjs": "2.2.4",
-    "next": "16.3.5",
-    "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "@ecommerce-store/spec": "*"
   },
   "devDependencies": {
-    "@ecommerce-store/seed": "*",
     "@types/node": "^22.0.0",
-    "@types/react": "^19.0.0",
     "harper": "5.2.12",
-    "typescript": "7.0.2"
+    "typescript": "7.0.2",
+    "@ecommerce-store/seed": "*"
   }
 }

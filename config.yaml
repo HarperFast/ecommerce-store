@@ -1,14 +1,13 @@
 # Harper Ecommerce Store — component configuration.
 #
-# The repo root IS the Harper component root AND the Next.js app root. This is not a
-# stylistic choice: `deploy_component` extracts a single directory tree to
-# components/<project> and Harper does NOT implement npm's `#path:` monorepo-subdirectory
-# git extension (components/Application.ts — parseGitReference returns null for it and the
-# deploy fails loudly). A nested app directory would make this repo undeployable by URL.
+# The repo root IS the Harper component root. This is not a stylistic choice:
+# `deploy_component` extracts a single directory tree to components/<project> and Harper
+# does NOT implement npm's `#path:` monorepo-subdirectory git extension
+# (components/Application.ts — parseGitReference returns null for it and the deploy fails
+# loudly). A nested app directory would make this repo undeployable by URL.
 # See docs/structure.md.
 
-rest:
-  webSocket: true
+rest: true
 
 graphqlSchema:
   files: 'schemas/*.graphql'
@@ -17,20 +16,11 @@ jsResource:
   files: 'resources/*.js'
 
 # --- ORDERING IS LOAD-BEARING -------------------------------------------------
-# server-timing MUST be registered BEFORE @harperfast/nextjs. Earlier-registered http
-# listeners become outer middleware layers, so its AsyncLocalStorage context wraps the
-# Next.js render and server components can contribute timing marks. Registering it after
-# yields an empty context inside the render.
-# Ported from harper-ecommerce-template (issue #7 there). Lands in P2 — instrumentation is
-# a first-commit requirement for the read surfaces, not a later addition.
+# server-timing MUST be registered before any handler whose time it needs to decompose.
+# Earlier-registered http listeners are outer middleware layers. Required by SPEC.md
+# OBS-001/OBS-003 and landing with the first endpoint, not after it.
 #
 # server-timing:
 #   package: './server-timing'
 #   files: '/*'
 # ------------------------------------------------------------------------------
-
-'@harperfast/nextjs':
-  package: '@harperfast/nextjs'
-  setCwd: false
-  # Do NOT add `files: '/*'` under this plugin on @harperfast/nextjs 2.x — it double-registers
-  # the request handler.

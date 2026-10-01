@@ -12,8 +12,8 @@ import { REQUIREMENTS } from '../packages/spec/src/index.ts';
 
 const spec = readFileSync(new URL('../SPEC.md', import.meta.url), 'utf8');
 
-// Area prefixes are 2-4 letters (RT, CAT, SRCH), then a three-digit number.
-const ID = /\b([A-Z]{2,4}-\d{3})\b/g;
+// Area prefixes are 2-6 letters (PDP, QUOTE, WRITE), then a three-digit number.
+const ID = /\b([A-Z]{2,6}-\d{3})\b/g;
 
 const inSpec = new Set([...spec.matchAll(ID)].map((m) => m[1]));
 const inRegistry = new Map(REQUIREMENTS.map((r) => [r.id, r]));

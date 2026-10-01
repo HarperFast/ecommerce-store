@@ -15,6 +15,8 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 # Tools that must never be installed on a node. Extend as the repo grows.
+# @playwright/* is listed even though nothing currently pulls it: it arrived once as an
+# OPTIONAL PEER dependency of a web framework, which no manifest makes visible.
 FORBIDDEN=(@playwright/test playwright playwright-core harper typescript)
 
 echo "==> packing $REPO_ROOT"
@@ -40,8 +42,9 @@ for pkg in "${FORBIDDEN[@]}"; do
   fi
 done
 
-# The application itself must still resolve.
-for pkg in next @harperfast/nextjs @ecommerce-store/spec @ecommerce-store/ui; do
+# The application itself must still resolve. P0 has no external runtime dependencies —
+# the only thing that must land is the spec workspace.
+for pkg in @ecommerce-store/spec; do
   if [ ! -e "node_modules/$pkg" ]; then
     echo "FAIL: runtime dependency '$pkg' is MISSING from the node" >&2
     status=1

@@ -1,112 +1,136 @@
 /**
- * Domain model — SPEC.md §4.
+ * Domain model — SPEC.md §3.
  *
- * Platform-neutral. These types describe what crosses the wire, never how anything is
- * stored. If a type here could not be produced by a Postgres implementation, it is
- * mis-specified.
+ * Stack-neutral. These types describe what crosses the wire, never how anything is stored.
+ * If a type here could not be produced by Fastify + Postgres + Redis, it is mis-specified.
  */
 
-/** Money is ALWAYS integer minor units (cents) — SPEC.md CAT-004. Never a float. */
+/** Money is ALWAYS integer minor units (cents) — SPEC.md DATA-002. Never a float. */
 export type Minor = number;
 
-/** Epoch milliseconds. Deterministic per seed — SPEC.md SEED-001. */
-export type EpochMs = number;
-
-export interface Category {
+export interface Cart {
 	id: string;
-	slug: string;
-	name: string;
-	parentId: string | null;
-	/** Ancestor slugs, root first, excluding self. */
-	path: string[];
-	/** `path.length`. */
-	depth: number;
+	customerId: string;
+	lines: CartLine[];
 }
 
-/** Ordered axis of the variant matrix, e.g. `{ name: 'size', values: ['S','M','L'] }`. */
-export interface OptionAxis {
-	name: string;
-	values: string[];
+export interface CartLine {
+	sku: string;
+	quantity: number;
+}
+
+export interface Customer {
+	id: string;
+	tier: string;
+	loyaltyBalance: Minor;
+	region: string;
+	taxJurisdiction: string;
 }
 
 export interface Product {
 	id: string;
-	slug: string;
 	title: string;
-	description: string;
-	brand: string;
 	categoryIds: string[];
-	optionAxes: OptionAxis[];
-	/** Flat, facetable. */
-	attributes: Record<string, string>;
-	createdAt: EpochMs;
+	/** Grams. Summed across lines for shipping — QUOTE-006. */
+	weight: number;
+	/** Fan out to further product reads — see the §3 foldings. */
+	relatedProductIds: string[];
+	reviewRollup: ReviewRollup;
 }
 
-/** The purchasable unit. */
+export interface ReviewRollup {
+	count: number;
+	/** Hundredths of a star, so no float enters the model. */
+	averageCentistars: number;
+}
+
 export interface Variant {
 	sku: string;
 	productId: string;
-	/** Exactly one entry per axis of the parent product — SPEC.md CAT-001. */
 	options: Record<string, string>;
-	price: Minor;
-	/** ISO 4217. `USD` for v1. */
-	currency: string;
-	stock: number;
-	/** Deterministic input to placeholder media — SPEC.md SEED-006. */
-	imageSeed: string;
+	basePrice: Minor;
+	weight: number;
 }
 
-/**
- * The projection returned by listing and search. Carries the product-level aggregates over
- * variants, which MUST be consistent with current variants at response time — SPEC.md
- * CAT-003. How they are kept consistent is deliberately unspecified; that is the finding.
- */
-export interface ProductSummary {
+export interface Inventory {
+	sku: string;
+	locationId: string;
+	onHand: number;
+}
+
+export interface Location {
 	id: string;
-	slug: string;
-	title: string;
-	brand: string;
-	priceMin: Minor;
-	priceMax: Minor;
-	/** True iff ANY variant has stock > 0. */
-	inStock: boolean;
-	/** Distinct values of the `color` axis in declared order; `[]` when there is none. */
-	swatches: string[];
-	variantCount: number;
-	imageSeed: string;
+	region: string;
+	/** Lower wins when resolving availability — QUOTE-003. */
+	priority: number;
 }
 
-/** Product detail — SPEC.md §5.3. Every variant, with live stock. */
-export interface ProductDetail extends Product {
+export type PromotionKind = 'exclusive' | 'threshold' | 'bogo' | 'stackable';
+
+export interface Promotion {
+	id: string;
+	kind: PromotionKind;
+	/** Eligibility. An empty array means "no restriction on this dimension". */
+	tiers: string[];
+	skus: string[];
+	categoryIds: string[];
+	/** For `threshold`: minimum pre-discount subtotal. */
+	thresholdMinor?: Minor;
+	/** Discount, in minor units or basis points; exactly one is set. */
+	amountMinor?: Minor;
+	amountBasisPoints?: number;
+}
+
+export type RateKind = 'shipping' | 'tax';
+
+export interface Rate {
+	id: string;
+	kind: RateKind;
+	/** shipping: region + weight band. tax: jurisdiction. */
+	region?: string;
+	weightMin?: number;
+	weightMax?: number;
+	jurisdiction?: string;
+	amountMinor?: Minor;
+	basisPoints?: number;
+}
+
+// --- responses ---------------------------------------------------------------
+
+export interface QuoteLine {
+	sku: string;
+	quantity: number;
+	/** After tier resolution, before promotions. */
+	unitPrice: Minor;
+	appliedPromotionIds: string[];
+	lineTotal: Minor;
+}
+
+/** SPEC.md QUOTE-010. Deterministic for a given cart and dataset state — QUOTE-008. */
+export interface Quote {
+	cartId: string;
+	lines: QuoteLine[];
+	subtotal: Minor;
+	discountTotal: Minor;
+	shipping: Minor;
+	tax: Minor;
+	grandTotal: Minor;
+	currency: string;
+}
+
+/** SPEC.md §5. Varies by tier and region — PDP-002. */
+export interface ProductAggregate {
+	product: Product;
 	variants: Variant[];
-}
-
-export interface FacetValue {
-	value: string;
-	count: number;
-}
-
-export interface Facet {
-	name: string;
-	values: FacetValue[];
-}
-
-export interface Page<T> {
-	items: T[];
-	/** 1-based. */
-	page: number;
-	pageSize: number;
-	/** Exact, never estimated, never capped — SPEC.md PLP-002. */
-	total: number;
-}
-
-export interface ProductListing extends Page<ProductSummary> {
-	facets: Facet[];
+	/** Per sku, aggregated across locations in the requested region. */
+	availability: Record<string, number>;
+	/** Per sku, resolved for the requested tier. */
+	resolvedPrice: Record<string, Minor>;
+	related: Product[];
+	tier: string;
+	region: string;
 }
 
 export interface ApiError {
 	error: { code: string; message: string };
 }
-
-/** Segment-keyed personalization — SPEC.md §9.4. */
-export type SegmentId = string;

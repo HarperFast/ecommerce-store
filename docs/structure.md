@@ -1,7 +1,7 @@
 # Repository structure — decision record
 
-Status: **decided** (P0). Verified against Harper `5.2.12` / `@harperfast/nextjs` `2.2.4`
-/ `next` `16.3.5` on 2026-09-14.
+Status: **decided** (P0). Verified against Harper `5.2.12` on 2026-09-14,
+re-verified 2026-10-01.
 
 ## The question
 
@@ -24,11 +24,16 @@ a hard constraint, from two independent places:
    treats that as "recognized as git, but not safely handleable" and **fails loudly** rather
    than falling back. So `package=github:HarperFast/ecommerce-store#path:apps/store` is not
    deployable. A single directory tree is the unit of deployment.
-2. **`@harperfast/nextjs` expects `next.config.*` at the component root.** The Harper
-   application root and the Next.js app root are the same directory.
+2. Harper framework plugins that wrap an application (`@harperfast/nextjs`, for example)
+   likewise expect their config at the component root.
 
-Consequence: `config.yaml`, `next.config.ts`, `app/`, `resources/` and `schemas/` all live
-at the top level, and `packages/*` are subdirectories of the deployed tree.
+Consequence: `config.yaml`, `resources/` and `schemas/` live at the top level, and
+`packages/*` are subdirectories of the deployed tree.
+
+**Note on (2):** P0 has no web framework — it is two JSON endpoints, and Next.js, React and
+a shared component package were removed rather than carried as inert dependencies that ship
+~300 MB to every node. Constraint (1) is sufficient on its own, so reintroducing a
+framework with the storefront reopens nothing here.
 
 ## The resolution: plain npm workspaces, no vendoring, no bundle step
 
@@ -40,6 +45,10 @@ Verified empirically against the exact commands Harper runs, not inferred:
 | Extract | tar to `components/<project>`, flattening one wrapper dir | workspace dirs are real directories |
 | Install | `npm install --force --omit=dev --no-audit --no-fund` (cwd = component root) | `node_modules/@ecommerce-store/{spec,ui,seed}` → relative symlinks into `packages/`; 26 packages, no dev tooling |
 | Runtime | `import { … } from '@ecommerce-store/spec'` | resolves |
+
+The `e2e/` exclusion below was originally forced by a Next.js optional peer dependency.
+Next.js is gone from P0, but the exclusion stays: it is correct on its own terms, and the
+leak would silently return the moment a framework does.
 
 `--install-links` is added only on win32 for candidate builds; on POSIX (Fabric) npm links
 `file:`/workspace dependencies **relatively**, which survives the staging→live rename.
@@ -56,7 +65,7 @@ workspace's `devDependencies` omitted it correctly.
 
 So:
 
-- `packages/spec`, `packages/ui` — runtime. Root `dependencies`. Keep their deps minimal.
+- `packages/spec` — runtime. Root `dependencies`. Keep its deps minimal.
 - `packages/seed` — dev-only. Everything heavy goes in **that workspace's**
   `devDependencies`, never its `dependencies`.
 
@@ -108,27 +117,23 @@ make this class of leak invisible in the manifest.
 ```
 ecommerce-store/            repo root = Harper component root = Next.js app root
   config.yaml               component config; plugin ORDER is load-bearing (see file)
-  next.config.ts            withHarper() + Harper-backed cache handler
-  schemas/*.graphql         table definitions, @export'd for the admin REST surface
-  resources/*.js            custom Harper Resources
-  app/                      Next.js App Router
+  schemas/*.graphql         the eight tables, @export'd
+  resources/*.js            the two endpoints
   packages/
-    spec/                   route contract + requirement ids — platform-neutral, runtime
-    ui/                     shared presentational components — runtime
-    seed/                   deterministic tiered catalog generator — dev-only
-    e2e/                    Playwright suite, the executable spec — dev-only
-  bench/                    k6 scripts (Harper baseline) — quarantined from app code
+    spec/                   route contract + requirement ids — stack-neutral, runtime
+    seed/                   deterministic dataset generator — dev-only
+  e2e/                      Playwright suite, the executable spec — NOT a workspace
+  dataset/                  the committed, checksummed dataset
   docs/
-  SPEC.md                   numbered, platform-neutral requirements
+  SPEC.md                   numbered, stack-neutral requirements
 ```
 
-`bench/` is deliberately separate: Emoji Emporium grew `/gencount`, `/touch`, `/streampage`
-endpoints sitting next to application code. A customer reading this reference should see an
-ecommerce app, not a benchmark rig.
+Measurement scaffolding does not live here at all. The harness — clock pinning, load ladder,
+per-target CPU accounting, correctness guards — is shared across comparisons and lives in
+the benchmarks repo. A customer reading this reference should see an ecommerce application,
+not a benchmark rig.
 
 ## Open
 
-- **TypeScript major.** Pinned `^5.9`. TypeScript `7.0.2` (the native port) is published;
-  adopting it in the flagship reference is a deliberate decision, not a default.
-- **`server-timing`.** Ported from `harper-ecommerce-template` in P2. Its `config.yaml`
-  ordering constraint is already recorded.
+- **`server-timing`.** Lands with the first endpoint, not after it (`OBS-003`). Its
+  `config.yaml` ordering constraint is already recorded.

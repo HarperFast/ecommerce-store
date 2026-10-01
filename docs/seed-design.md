@@ -1,115 +1,57 @@
-# Corpus generation
+# Dataset generation
 
-Status: **P0 design.** Implements SPEC.md §8.
+Status: **P0 design.** Implements SPEC.md §3.
 
-## The requirement behind the design
+## Generate once, commit the artifact
 
-`SEED-001` says the same tier and seed must produce an identical corpus **on every
-platform**. A comparison run against differing corpora is void, and a corpus that differs
-subtly — one extra out-of-stock SKU, a different tie in a sort order — produces a
-difference in `total` or in facet counts that looks like a platform difference.
+`DATA-003` requires every implementation to load the same data, and `DATA-005` requires it generated deterministically and kept under version control.
 
-## Decision: generate once, distribute as data
+The tempting approach is to ship a generator each implementation runs. It is the wrong one: it makes dataset identity depend on every implementation reproducing the same PRNG stream, the same rounding, and the same iteration order, across languages and runtimes. That is a guarantee re-proved on every comparison, and its failure mode is silent — a few hundred differing inventory rows read as a platform difference.
 
-The obvious approach is to ship a generator that every implementation runs. It is the wrong
-one. It makes corpus identity depend on every implementation reproducing the same PRNG
-stream, the same floating-point rounding, the same string collation, and the same iteration
-order — across languages and runtimes. That is a guarantee we would be re-proving on every
-comparison, and its failure mode is silent.
+> **The generator runs once. The output is committed and checksummed. Every implementation loads the artifact. Identity is established by checksum, not by re-derivation.**
 
-Instead:
+### Format
 
-> **`packages/seed` generates the corpus once and emits a portable artifact. Every
-> implementation imports that artifact. Identity is established by checksum, not by
-> re-derivation.**
-
-The generator is deterministic anyway, so the artifact is reproducible from the seed — but
-no implementation depends on reproducing it. The generator runs in CI, and the checksum is
-the contract.
-
-### Artifact format
-
-Newline-delimited JSON, one file per entity type, key order canonicalized:
+Newline-delimited JSON, one file per table, with canonicalized key order:
 
 ```
-corpus/<tier>/categories.ndjson
-corpus/<tier>/products.ndjson
-corpus/<tier>/variants.ndjson
-corpus/<tier>/shoppers.ndjson
-corpus/<tier>/MANIFEST.json
+dataset/
+  cart.ndjson  customer.ndjson  product.ndjson  variant.ndjson
+  inventory.ndjson  location.ndjson  promotion.ndjson  rate.ndjson
+  MANIFEST.json
 ```
 
-NDJSON because it streams: the `lg` tier does not fit comfortably in memory, and an importer
-that must parse one large JSON array before writing anything forces every implementation to
-solve a problem the benchmark is not about.
+NDJSON because it streams. The dataset is deliberately larger than memory (`DATA-004`), so an importer that must parse one large array before writing anything forces every implementation to solve a problem the benchmark is not about.
 
-`MANIFEST.json` carries the tier, the seed, the generator version, per-file SHA-256, and
-entity counts. `SEED-005` is satisfied by verifying the manifest before an import, and every
-comparison records the manifest hash it ran against.
+`MANIFEST.json` carries the generator version, the seed, per-file SHA-256 and row counts, and the declared distributions. Verified before every run; recorded with every published result.
 
-## Tiers
+## One size
 
-| Tier | Products | Variants | Purpose |
-|---|---|---|---|
-| `sm` | 1,000 | ~2,500 | Local development, CI, e2e |
-| `md` | 10,000 | ~25,000 | Functional verification, conformance runs |
-| `lg` | 50,000 | ~100,000+ | Benchmarks |
+There is one dataset, sized so the working set does not fit in memory on the benchmark hardware. No small in-memory variant, and store size is not swept as a variable — a comparison measures the architecture, not the dataset.
 
-`SEED-003` requires the `lg` working set to exceed the compared tier's memory. That is a
-property of a *pair* — corpus and hardware — not of the corpus alone, so it is verified at
-benchmark time and recorded, and `lg` grows if free tiers grow (as a new spec version, per
-§11). It is not a number frozen here on the assumption that 1 GB stays the floor.
+A small fixture for local development and CI is a convenience and may exist, but it is never a benchmark target and never appears in a result.
 
 ## Determinism rules
 
-These are the rules the generator follows; they exist because each one is a way a corpus
-silently stops being reproducible.
+Each exists because it is a way a dataset silently stops being reproducible.
 
-1. **One seeded PRNG, consumed in a fixed order.** No `Math.random`, no `Date.now`, no
-   `crypto.randomUUID`, no iteration over an unordered structure.
-2. **Ids are derived, not drawn.** `product-00042`, `sku-00042-03`. Ids stay stable when the
-   generator changes elsewhere, so a corpus change is a diff rather than a reshuffle.
-3. **Timestamps are derived from the index**, offset from a fixed epoch constant. No wall
-   clock anywhere in generation.
-4. **Money is integer minor units at every step** (`CAT-004`). Prices are drawn as integers;
-   no float is constructed and rounded.
-5. **Vocabularies are fixed tables in source** (`SEED-004`) — categories, brands, option
-   axes, materials, colors, adjectives. Never sampled from an external source, never
-   generated by a model.
-6. **Distributions are explicit.** Variant counts per product, stock levels, and price
-   ranges follow declared distributions rather than uniform draws, because uniform data
-   makes facet counting artificially easy and cache hit rates artificially flat.
+1. **One seeded PRNG, consumed in a fixed order.** No `Math.random`, no `Date.now`, no `randomUUID`, no iteration over an unordered structure.
+2. **Ids are derived, not drawn** — `product-00042`, `sku-00042-03`. A generator change becomes a diff rather than a reshuffle.
+3. **No wall clock anywhere.** Timestamps derive from the row index against a fixed epoch constant.
+4. **Money is integer minor units at every step** (`DATA-002`). Prices are drawn as integers; no float is constructed and rounded.
+5. **Vocabularies are fixed tables in source** — categories, tiers, regions, jurisdictions, option axes. Never sampled externally, never model-generated.
+6. **Distributions are explicit and recorded in the manifest.**
 
 ### Distribution shape
 
-Uniform data would be the single easiest way to accidentally produce a flattering benchmark.
-Real catalogs are skewed, and the skew is what makes caching and faceting interesting:
+Uniform data is the easiest way to accidentally produce a flattering benchmark, because it makes caching and lookup artificially even.
 
-- **Variants per product** — most products have few, some have many (a size × color grid).
-  A long tail, not a constant.
-- **Category population** — heavily unequal. Some categories hold thousands of products,
-  most hold tens. This is what makes `PLP-001`'s descendant expansion cost vary.
-- **Stock** — a meaningful fraction of SKUs at zero, so `inStock` filtering and the
-  `inStock` facet (`PLP-006`) are exercised rather than trivially all-true.
-- **Price** — skewed within a category, so `price_asc` ordering is not near-degenerate.
+- **Cart size** — the load generator needs a realistic distribution, and the dataset must contain carts matching it. Most carts are small; a meaningful tail is large, and the tail is where the fan-out cost shows.
+- **Variants per product** — a long tail, not a constant.
+- **Inventory across locations** — a sku is stocked at some locations and not others, so location-priority resolution (`QUOTE-003`) does real work rather than always hitting the first.
+- **Promotion eligibility** — most carts qualify for few promotions, some for many with stacking and exclusivity in play. A dataset where promotions rarely apply would skip the pricing logic the endpoint exists to exercise.
+- **Access skew** — the read workload is not uniform over the catalog. A hot subset is what makes cache-hit rate a meaningful measurement at all, and `WRITE-001` requires the writer to target the same working set.
 
-The exact parameters are recorded in the manifest so a published comparison can state them.
+## Why the generator still ships
 
-## Shoppers
-
-`AUTH-006` requires seeded accounts driveable with no human step. Password hashes are
-generated with the pinned KDF parameters from [`auth-design.md`](auth-design.md), which is
-slow by design — so hashes are generated **once, into the artifact**, not at import time.
-Importing the `lg` tier must not mean computing 100,000 scrypt hashes on the node.
-
-All seeded shoppers share one known plaintext password. The artifact carries per-shopper
-salts and hashes, so login remains a real KDF verification (`AUTH-001`) while corpus import
-stays cheap.
-
-## Media
-
-`SEED-006` requires deterministic placeholder media derived from `imageSeed`, served from
-each implementation's own origin and byte-identical across implementations. `imageSeed` is
-generated into the artifact; the rendering function is shared via `packages/ui` so the bytes
-match. Real photography would turn the comparison into a bandwidth test — see the recorded
-expansion point in SPEC.md §10.
+The artifact is what implementations consume, but the generator is committed alongside it. `DATA-005` requires the dataset be reproducible, and a committed artifact nobody can regenerate is a magic file. The generator is the audit trail; the artifact is the contract.
