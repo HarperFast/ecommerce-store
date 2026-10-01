@@ -13,8 +13,10 @@ out/
 # Generated catalog corpora (deterministic; regenerate with `npm run seed`)
 /.seed-cache/
 
-# Agent worktrees and scratch
-/.claude/worktrees/
-/.claude/tmp/
+# Claude
+.claude/
 
 .DS_Store
+
+# Harness output — raw samples are retained per run, not committed.
+bench/results/

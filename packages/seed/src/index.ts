@@ -30,9 +30,13 @@ export const EPOCH_MS = 1_767_225_600_000;
  * Accompanies the committed dataset. Verified before every run; recorded with every
  * published result — SPEC.md DATA-003, DATA-005.
  */
+export const GENERATOR_VERSION = '0.1.0' as const;
+
 export interface DatasetManifest {
 	specVersion: string;
 	generatorVersion: string;
+	/** Only `bench` is a valid benchmark target — SPEC.md DATA-004. */
+	scale: string;
 	seed: string;
 	/** table → { sha256, rows } */
 	files: Record<Table, { sha256: string; rows: number }>;

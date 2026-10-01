@@ -105,8 +105,11 @@ make this class of leak invisible in the manifest.
 
 - If `node_modules` already exists in the payload, **install is skipped entirely** and the
   runtime is treated as opaque for redeploy comparison. Never ship `node_modules`.
-- `npm pack` respects `.gitignore` when there is no `.npmignore`. Ignoring a path here
-  removes it from the deployed component. See the warning at the top of `.gitignore`.
+- **There is now a `.npmignore`, and it REPLACES `.gitignore` for packing — it does not
+  merge with it.** Anything `.gitignore` excludes must be repeated there or it lands in the
+  deployed component. It exists because the ~800 MB dataset is committed to git (it is the
+  benchmark's contract) but must not ship in a deploy payload: it is loaded separately via
+  the operations API, outside the measured run.
 - `devEngines.packageManager` can select pnpm/yarn, which then run with **their own**
   install defaults (dev dependencies included). We stay on npm deliberately: the zero-config
   path is the one a customer will clone, and it is the one Harper exercises by default.

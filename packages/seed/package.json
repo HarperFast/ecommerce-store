@@ -8,7 +8,7 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "seed": "node --experimental-strip-types src/cli.ts"
+    "seed": "node src/cli.ts"
   },
   "devDependencies": {}
 }

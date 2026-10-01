@@ -1,0 +1,83 @@
+# The eight tables — SPEC.md §3, designed in docs/data-model.md.
+#
+# Deliberately NOT pre-joined. The fan-out across these tables is what the benchmark
+# measures (DATA-001), so a shape that collapses a required read is a conformance failure,
+# not an optimization.
+#
+# @sealed everywhere: the dataset is fixed and checksum-verified, so an unexpected attribute
+# means a loader bug, and failing loudly at write time beats discovering it in a result.
+
+type Cart @table @export @sealed {
+	id: ID @primaryKey
+	customerId: String @indexed
+	# [{ sku, quantity }] — embedded, so reading the cart is ONE read. The per-line fan-out
+	# is the second wave; splitting lines out would add a wave the spec does not describe.
+	lines: Any
+}
+
+type Customer @table @export @sealed {
+	id: ID @primaryKey
+	tier: String @indexed
+	loyaltyBalance: Int
+	region: String @indexed
+	taxJurisdiction: String @indexed
+}
+
+type Product @table @export @sealed {
+	id: ID @primaryKey
+	title: String
+	categoryIds: [String] @indexed
+	weight: Int
+	# Fans out to further Product reads — depth preserved, see docs/data-model.md §foldings.
+	relatedProductIds: [String]
+	# { count, averageCentistars } — a field, not a table. Nothing in P0 writes reviews.
+	reviewRollup: Any
+}
+
+type Variant @table @export @sealed {
+	sku: ID @primaryKey
+	productId: String @indexed
+	options: Any
+	# Minor units. Mutated by the background writer.
+	basePrice: Int
+	weight: Int
+}
+
+type Inventory @table @export @sealed {
+	# `${sku}:${locationId}` — a synthetic key so a line's availability is a bounded set of
+	# direct reads on every implementation rather than a scan.
+	id: ID @primaryKey
+	sku: String @indexed
+	locationId: String @indexed
+	onHand: Int
+}
+
+type Location @table @export @sealed {
+	id: ID @primaryKey
+	region: String @indexed
+	# Lower wins when resolving availability — QUOTE-003.
+	priority: Int
+}
+
+type Promotion @table @export @sealed {
+	id: ID @primaryKey
+	kind: String @indexed
+	# Empty array means "no restriction on this dimension".
+	tiers: [String] @indexed
+	skus: [String] @indexed
+	categoryIds: [String] @indexed
+	thresholdMinor: Int
+	amountMinor: Int
+	amountBasisPoints: Int
+}
+
+type Rate @table @export @sealed {
+	id: ID @primaryKey
+	kind: String @indexed
+	region: String @indexed
+	weightMin: Int
+	weightMax: Int
+	jurisdiction: String @indexed
+	amountMinor: Int
+	basisPoints: Int
+}
