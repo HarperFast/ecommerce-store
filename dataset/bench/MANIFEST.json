@@ -1,6 +1,6 @@
 {
   "specVersion": "0.2.0-draft",
-  "generatorVersion": "0.1.0",
+  "generatorVersion": "0.2.0",
   "scale": "bench",
   "seed": "harper-ecommerce-store-v1",
   "compressed": true,
@@ -26,7 +26,7 @@
       "rows": 31281273
     },
     "promotion": {
-      "sha256": "9fa8360b46065adbfe299ce509b10617b8bd43ce85af753a54272161de5fae19",
+      "sha256": "931651a6b1875af27bfae4a5f7e5dbd33f58d362585ab483bee85d26e9e690c4",
       "rows": 5000
     },
     "rate": {
