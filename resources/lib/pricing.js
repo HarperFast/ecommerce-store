@@ -23,6 +23,15 @@ function applyBasisPoints(amount, basisPoints) {
 	return Math.floor((amount * basisPoints + 5000) / 10000);
 }
 
+/**
+ * The discount ceiling. Floors rather than rounding half-up: a cap that rounds UP can exceed
+ * the bound it exists to enforce (at a subtotal of 1001, half-up yields 601, which is
+ * 60.04%). A bound must never be exceeded by its own rounding.
+ */
+function discountCeiling(subtotal) {
+	return Math.floor((subtotal * MAX_DISCOUNT_BASIS_POINTS) / 10000);
+}
+
 export function resolveUnitPrice(basePrice, tier) {
 	const bp = TIER_BASIS_POINTS[tier] ?? TIER_BASIS_POINTS.standard;
 	return applyBasisPoints(basePrice, bp);
@@ -103,17 +112,76 @@ function groupByPromotion(candidates) {
  *   - per-line `remaining`, which bogo/stackable draw down, so a line can never be discounted
  *     below zero and a percentage promotion compounds against what is actually left
  */
-export function evaluatePromotions({ lines, candidates, subtotal }) {
+export function evaluatePromotions({ lines: inputLines, candidates, subtotal }) {
+	/**
+	 * Merge duplicate SKUs before evaluating.
+	 *
+	 * Every map in here is keyed by SKU, but neither SPEC.md nor the schema requires a cart's
+	 * lines to be distinct — lines are an unrestricted embedded array. With a repeated SKU the
+	 * maps held one entry while the total was summed once per line, producing a NEGATIVE
+	 * discount (a quote charging above its own subtotal) for a cart with no promotions at all.
+	 * Merging is the behaviour a shopper expects anyway: two entries of the same SKU are one
+	 * line of a larger quantity.
+	 */
+	const merged = new Map();
+	for (const line of inputLines) {
+		const existing = merged.get(line.sku);
+		if (existing) existing.quantity += line.quantity;
+		else merged.set(line.sku, { ...line });
+	}
+	const lines = [...merged.values()];
+
 	const perLine = new Map(lines.map((l) => [l.sku, []]));
 	const lineFor = new Map(lines.map((l) => [l.sku, l]));
+	/** The ONE budget. Every discount, cart-wide or per-line, draws this down. */
 	const remaining = new Map(lines.map((l) => [l.sku, l.unitPrice * l.quantity]));
+
+	const ceiling = discountCeiling(subtotal);
+	const spent = () => lines.reduce((sum, l) => sum + (l.unitPrice * l.quantity - remaining.get(l.sku)), 0);
+	const headroom = () => ceiling - spent();
 
 	const grouped = groupByPromotion(candidates);
 	const of = (kind) => grouped.filter((entry) => entry.promotion.kind === kind);
 
-	/** A cart-wide promotion is attributed to every line it was eligible for. */
-	const attribute = (entry) => {
-		for (const sku of entry.skus) perLine.get(sku)?.push(entry.promotion.id);
+	/**
+	 * Draw `amount` down across `skus` in proportion to what each still has left.
+	 *
+	 * Cart-wide promotions used to accumulate in their own counter while per-line promotions
+	 * drew down `remaining`, so both discounted the SAME money and only the final clamp hid
+	 * it — a 50% threshold plus a 50% stackable "discounted" 100% of a one-line cart. One
+	 * budget makes that structurally impossible.
+	 *
+	 * Integer allocation by largest remainder, ties on ascending sku, so the split is exact
+	 * and never depends on cart line order.
+	 */
+	const drawDown = (skus, amount) => {
+		const eligible = skus.filter((sku) => (remaining.get(sku) ?? 0) > 0).sort();
+		const pool = eligible.reduce((sum, sku) => sum + remaining.get(sku), 0);
+		const budget = Math.min(amount, pool, headroom());
+		if (budget <= 0) return [];
+		const shares = eligible.map((sku) => {
+			const exact = (remaining.get(sku) * budget) / pool;
+			return { sku, whole: Math.floor(exact), frac: exact - Math.floor(exact) };
+		});
+		let allocated = shares.reduce((sum, s) => sum + s.whole, 0);
+		for (const share of [...shares].sort((a, b) => b.frac - a.frac || (a.sku < b.sku ? -1 : 1))) {
+			if (allocated >= budget) break;
+			if (share.whole + 1 > remaining.get(share.sku)) continue;
+			share.whole++;
+			allocated++;
+		}
+		const touched = [];
+		for (const share of shares) {
+			if (share.whole <= 0) continue;
+			remaining.set(share.sku, remaining.get(share.sku) - share.whole);
+			touched.push(share.sku);
+		}
+		return touched;
+	};
+
+	/** Attribute a promotion to exactly the lines it actually discounted — QUOTE-012. */
+	const attribute = (entry, skus) => {
+		for (const sku of skus) perLine.get(sku)?.push(entry.promotion.id);
 	};
 
 	// 1. Exclusive — cart-wide. The highest-value one wins outright; nothing else applies.
@@ -131,65 +199,54 @@ export function evaluatePromotions({ lines, candidates, subtotal }) {
 			}
 		}
 		if (best && bestValue > 0) {
-			attribute(best);
-			return {
-				discountTotal: Math.min(bestValue, applyBasisPoints(subtotal, MAX_DISCOUNT_BASIS_POINTS), subtotal),
-				perLine,
-			};
+			const touched = drawDown(best.skus, bestValue);
+			if (touched.length) {
+				attribute(best, touched);
+				return { discountTotal: spent(), perLine };
+			}
 		}
 	}
-
-	let cartDiscount = 0;
 
 	// 2. Threshold — cart-wide, against the pre-discount subtotal. Once per promotion.
 	for (const entry of of('threshold')) {
 		if (!meetsThreshold(entry.promotion, subtotal)) continue;
-		const value = Math.min(discountFor(entry.promotion, subtotal), subtotal - cartDiscount);
-		if (value <= 0) continue;
-		cartDiscount += value;
-		attribute(entry);
+		const touched = drawDown(entry.skus, discountFor(entry.promotion, subtotal));
+		if (touched.length) attribute(entry, touched);
 	}
 
 	// 3. BOGO — the single lowest-priced qualifying unit, once per promotion. Ties on the
 	//    lower sku, so the choice does not depend on cart line order.
 	for (const entry of of('bogo')) {
-		const qualifying = entry.skus
+		const line = entry.skus
 			.map((sku) => lineFor.get(sku))
-			.filter((line) => line && line.quantity >= 2 && (remaining.get(line.sku) ?? 0) > 0)
-			.sort((a, b) => a.unitPrice - b.unitPrice || (a.sku < b.sku ? -1 : 1));
-		const line = qualifying[0];
+			.filter((l) => l && l.quantity >= 2 && (remaining.get(l.sku) ?? 0) > 0)
+			.sort((a, b) => a.unitPrice - b.unitPrice || (a.sku < b.sku ? -1 : 1))[0];
 		if (!line) continue;
-		const value = Math.min(line.unitPrice, remaining.get(line.sku));
-		if (value <= 0) continue;
-		remaining.set(line.sku, remaining.get(line.sku) - value);
-		perLine.get(line.sku)?.push(entry.promotion.id);
+		const touched = drawDown([line.sku], line.unitPrice);
+		if (touched.length) attribute(entry, touched);
 	}
 
 	// 4. Stackable — against each eligible line's REMAINING amount, so successive percentage
-	//    discounts compound instead of all computing against the gross line total. At most
-	//    MAX_STACKABLE_PER_LINE apply to any line, in ascending promotion id.
+	//    discounts compound. At most MAX_STACKABLE_PER_LINE apply to any one line.
 	const stackedOnLine = new Map(lines.map((l) => [l.sku, 0]));
 	for (const entry of of('stackable')) {
 		if (!meetsThreshold(entry.promotion, subtotal)) continue;
-		let applied = false;
+		const touched = [];
 		for (const sku of entry.skus) {
 			if ((stackedOnLine.get(sku) ?? 0) >= MAX_STACKABLE_PER_LINE) continue;
 			const left = remaining.get(sku) ?? 0;
 			if (left <= 0) continue;
-			const value = Math.min(discountFor(entry.promotion, left), left);
-			if (value <= 0) continue;
-			remaining.set(sku, left - value);
+			const applied = drawDown([sku], discountFor(entry.promotion, left));
+			if (!applied.length) continue;
 			stackedOnLine.set(sku, (stackedOnLine.get(sku) ?? 0) + 1);
-			applied = true;
+			touched.push(sku);
 		}
-		if (applied) attribute(entry);
+		// Attributed to exactly the lines it discounted, never to every line it was eligible
+		// for: a promotion cited on a line it did not reduce is a phantom id.
+		if (touched.length) attribute(entry, touched);
 	}
 
-	const lineDiscount = lines.reduce((sum, l) => sum + (l.unitPrice * l.quantity - remaining.get(l.sku)), 0);
-	// The cap is the LAST thing applied, so it bounds every path including a single
-	// large exclusive. Stated in basis points to stay in integer minor units.
-	const cap = applyBasisPoints(subtotal, MAX_DISCOUNT_BASIS_POINTS);
-	return { discountTotal: Math.min(cartDiscount + lineDiscount, cap, subtotal), perLine };
+	return { discountTotal: spent(), perLine };
 }
 
 /** Shipping: the band whose weight range contains the cart's total weight, for the region. */

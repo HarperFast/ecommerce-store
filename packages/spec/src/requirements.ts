@@ -41,7 +41,7 @@ export const REQUIREMENTS: readonly Requirement[] = [
 	r('QUOTE-008', 'QUOTE', 'MUST', 'The quote is deterministic for a given cart and dataset state'),
 	r('QUOTE-009', 'QUOTE', 'MUST', 'An unknown cart id returns 404'),
 	r('QUOTE-010', 'QUOTE', 'MUST', 'The response itemizes per line and at cart level'),
-	r('QUOTE-011', 'QUOTE', 'MUST', 'No promotion applies more than once; discountTotal never exceeds 60% of subtotal'),
+	r('QUOTE-011', 'QUOTE', 'MUST', 'Cart-wide and BOGO promotions apply once per cart, stackables once per eligible line (max 3); discountTotal in [0, 60% of subtotal]'),
 	r('QUOTE-012', 'QUOTE', 'MUST', 'appliedPromotionIds lists exactly the promotions that discounted that line'),
 
 	// §5 Product aggregate

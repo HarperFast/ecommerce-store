@@ -23,39 +23,59 @@ test.describe('cart quote', () => {
 	// Sweeps a spread of carts rather than one: the defect these guard against was a cart-wide
 	// promotion applied once per eligible line, which only shows on multi-line carts where that
 	// promotion happens to be eligible. A single fixture would have missed it.
-	test(covers('QUOTE-011')('no discount exceeds the subtotal, across many carts'), async ({ request }) => {
+	test(covers('QUOTE-011')('discounts stay within the normative 60% cap, across many carts'), async ({ request }) => {
 		const ids = Array.from({ length: 40 }, (_, i) => `cart-${String(i * 47).padStart(6, '0')}`);
 		const offenders: string[] = [];
+		let checked = 0;
 		for (const id of ids) {
 			const response = await request.post(API.quote(id), { data: {} });
 			if (response.status() === 404) continue;
+			checked++;
 			const body = await response.json();
 			const lineSum = body.lines.reduce((sum: number, l: { lineTotal: number }) => sum + l.lineTotal, 0);
-			if (body.discountTotal > body.subtotal || body.discountTotal < 0 || body.subtotal !== lineSum) {
-				offenders.push(`${id}: subtotal=${body.subtotal} lineSum=${lineSum} discount=${body.discountTotal}`);
+			// The cap is FLOORED (SPEC.md §4): asserting only `<= subtotal` accepted a 90%
+			// discount, which is what the previous version of this test did.
+			const cap = Math.floor((body.subtotal * 6000) / 10000);
+			if (body.discountTotal > cap || body.discountTotal < 0 || body.subtotal !== lineSum) {
+				offenders.push(`${id}: subtotal=${body.subtotal} lineSum=${lineSum} discount=${body.discountTotal} cap=${cap}`);
 			}
 		}
+		// Without this, a run where every id 404s passes having verified nothing.
+		expect(checked, 'quotes actually checked').toBeGreaterThan(20);
 		expect(offenders, 'carts violating the discount invariant').toEqual([]);
 	});
 
-	test(covers('QUOTE-012')('applied promotion ids are unique per line and only cited when they discounted'), async ({ request }) => {
+	test(covers('QUOTE-012')('every cited promotion reduced the line that cites it'), async ({ request }) => {
 		const ids = Array.from({ length: 40 }, (_, i) => `cart-${String(i * 47).padStart(6, '0')}`);
 		const offenders: string[] = [];
+		let checked = 0;
+		let withCitations = 0;
 		for (const id of ids) {
 			const response = await request.post(API.quote(id), { data: {} });
 			if (response.status() === 404) continue;
+			checked++;
 			const body = await response.json();
 			for (const line of body.lines) {
-				const ids2: string[] = line.appliedPromotionIds;
+				const cited: string[] = line.appliedPromotionIds;
+				if (cited.length) withCitations++;
 				// A promotion listed twice on one line is the double-application signature.
-				if (new Set(ids2).size !== ids2.length) offenders.push(`${id}/${line.sku}: duplicate ids ${ids2.join(',')}`);
+				if (new Set(cited).size !== cited.length) offenders.push(`${id}/${line.sku}: duplicate ids ${cited.join(',')}`);
+				// A cited promotion must have reduced THIS line. `lineTotal` is the gross line
+				// amount, so a line citing promotions while paying its full share of an
+				// undiscounted cart is a phantom citation.
+				if (cited.length && body.discountTotal === 0) {
+					offenders.push(`${id}/${line.sku}: cites ${cited.join(',')} but the cart has no discount`);
+				}
+				if (line.unitPrice * line.quantity !== line.lineTotal) {
+					offenders.push(`${id}/${line.sku}: lineTotal ${line.lineTotal} != unitPrice*quantity`);
+				}
 			}
-			// Promotions cited anywhere imply a discount, and a discount implies a citation.
-			const cited = body.lines.some((l: { appliedPromotionIds: string[] }) => l.appliedPromotionIds.length > 0);
-			if (cited !== body.discountTotal > 0) {
-				offenders.push(`${id}: cited=${cited} but discountTotal=${body.discountTotal}`);
+			if (body.discountTotal > 0 && !body.lines.some((l: { appliedPromotionIds: string[] }) => l.appliedPromotionIds.length)) {
+				offenders.push(`${id}: discounted ${body.discountTotal} with no promotion cited anywhere`);
 			}
 		}
+		expect(checked, 'quotes actually checked').toBeGreaterThan(20);
+		expect(withCitations, 'lines citing a promotion').toBeGreaterThan(0);
 		expect(offenders, 'carts violating promotion attribution').toEqual([]);
 	});
 

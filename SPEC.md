@@ -99,7 +99,11 @@ The write-shaped read path, and the primary endpoint under test. Prices a cart.
 
 Normative, because promotion stacking is order-dependent and an unspecified order makes two correct implementations disagree on the total — which the measurement rules classify as non-equivalent semantics, an invalid cell rather than a close one.
 
-> **Each promotion applies at most once**, however many lines it is eligible for. This is the rule that decides most of the rest; an earlier draft left it implicit and a cart-wide 34%-off promotion eligible for three lines priced the cart to zero, as a well-formed deterministic 200.
+> **Each cart-wide promotion (`exclusive`, `threshold`) and each `bogo` promotion applies at most once per cart. Each `stackable` promotion applies at most once per eligible line.** This is the rule that decides most of the rest; an earlier draft left it implicit and a cart-wide 34%-off promotion eligible for three lines priced the cart to zero, as a well-formed deterministic 200.
+
+> **All discounts draw on one budget: the line's remaining amount.** Cart-wide discounts are allocated across the lines they are eligible for, in proportion to what each still has left, by largest remainder with ties on ascending SKU. Separate cart-wide and per-line accumulators let both discount the same money, which the 60% cap then concealed.
+
+> **Cart lines are merged by SKU before evaluation.** Nothing requires a cart's lines to be distinct, and per-SKU state with repeated SKUs produced a negative discount — a quote charging above its own subtotal — for a cart with no promotions.
 
 Promotions are either **cart-wide** (`exclusive`, `threshold`) or **per-line** (`bogo`, `stackable`). The two draw on separate budgets: cart-wide discounts accumulate against the subtotal, per-line discounts draw down that line's remaining amount. Neither may take a line or the cart below zero.
 
@@ -116,7 +120,7 @@ Steps 7 and 8 are normative bounds, not tuning: real stores limit stacking, and 
 
 Rounding: each discount rounds half-up to the minor unit at the point it is applied, not at the end.
 
-- `QUOTE-011` **MUST** — No promotion is applied more than once, and `discountTotal` never exceeds 60% of the subtotal.
+- `QUOTE-011` **MUST** — Each cart-wide and BOGO promotion applies at most once per cart; each stackable applies at most once per eligible line, at most three per line. `discountTotal` is never negative and never exceeds 60% of the subtotal, **floored** — a bound that rounds up can exceed itself.
 - `QUOTE-012` **MUST** — `appliedPromotionIds` lists exactly the promotions that produced a discount for that line. A cart-wide promotion appears on every line it was eligible for.
 
 ---
