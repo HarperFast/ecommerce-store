@@ -181,7 +181,7 @@ P0 does not complete until this document passes: self-review → cross-model rev
 | Gate | Status |
 |---|---|
 | Self-review | ☐ |
-| Cross-model review | ☐ |
+| Cross-model review | ☑ 2026-10-01 — two rounds, Claude + codex (agy timed out both rounds) |
 | Human review | ☐ |
 
 **Known open:** `FRESH_MS` (§6), the eight-table foldings (§3), and the promotion evaluation order (§4) — the last because it is invented here rather than derived from a real system, and it determines whether two correct implementations agree on a total.
