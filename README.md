@@ -55,3 +55,17 @@ Pinned and verified 2026-10-01: harper `5.2.12` · TypeScript `7.0.2` · Node `>
 ## License
 
 MIT
+
+## Development
+
+This repo uses **Git LFS** for the benchmark dataset. Install it before cloning, or the large files arrive as text pointers instead of data:
+
+```bash
+git lfs install
+```
+
+If you have already cloned without it, `git lfs pull` fixes it in place. The `dev` dataset is plain git and needs none of this.
+
+```bash
+npm install
+```
