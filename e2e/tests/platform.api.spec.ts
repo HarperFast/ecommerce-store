@@ -21,8 +21,7 @@ test.describe('background writes', () => {
 	test.fixme(covers('WRITE-004')('the write stream matches the configured rate and key distribution'), async () => {});
 });
 
+// OBS-001 / OBS-002 / OBS-003 are covered for real in cache.api.spec.ts.
 test.describe('observability', () => {
-	test.fixme(covers('OBS-001')('Server-Timing decomposes data access, compute and total'), async () => {});
-	test.fixme(covers('OBS-002')('responses indicate cache status'), async () => {});
-	test.fixme(covers('OBS-003')('instrumentation is present on both endpoints'), async () => {});
+	test.fixme(covers('OBS-001')('the quote endpoint decomposes its phases too'), async () => {});
 });

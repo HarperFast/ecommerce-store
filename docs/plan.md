@@ -20,14 +20,16 @@ The benchmarks repo's methodology is binding here. Results are never published f
 
 | Piece | State |
 |---|---|
-| `SPEC.md` — 29 requirements | Written; two rounds of cross-model review applied. **Human review gate not passed.** |
-| Schema — 8 tables | Built |
+| `SPEC.md` — 32 requirements | Written; two rounds of cross-model review applied. **Human review gate not passed.** |
+| Schema — 8 tables + 1 cache | Built |
+| Caching | `ProductView`, a `sourcedFrom` cache keyed by product × tier × region, invalidated write-through with a 120s expiry backstop |
+| Write surface | `POST /admin/variant/:sku`, `POST /admin/inventory/:id` — write and invalidate |
 | `POST /cart/:id/quote` | Built, unverified beyond smoke tests |
 | `GET /product/:id` | Built, unverified beyond smoke tests |
 | Background writer | Harness-side only; no in-app writer |
 | `dev` dataset — 46,583 rows | Committed, plain git |
 | `bench` dataset — 40,656,446 rows | Committed via Git LFS |
-| Conformance suite | **8 of 29 real**, 21 stubs |
+| Conformance suite | **12 of 32 real**, 20 stubs |
 | Load harness | Works; knows what it cannot claim |
 | Containers | Works, 2 CPU / 2 GiB target |
 | CI | Written, **never executed** — no remote yet |
@@ -57,8 +59,9 @@ Two rounds of three-reviewer cross-model review (Claude subagent, agy/Gemini, co
 |---|---|
 | **Pricing phase balance.** With one discount budget and a 60% cap, cart-wide promotions consume the headroom first: of 300 dev carts, exclusive reaches 51% and threshold 47%, but BOGO 1% and stackable 2%. | A workload-design tradeoff, not a bug — cap strictness versus phase coverage. Loosening the cap, narrowing cart-wide eligibility, or reordering the phases all change what the benchmark measures. Needs a decision, then one regeneration of both datasets. |
 | **No ground-truth correctness guard in the harness.** It treats every 2xx as success and never compares a response to an independently computed expected value. Determinism alone does not establish correctness — a consistently wrong answer is deterministic too. | The measurement rules require this. It needs pinned fixtures with expected quotes, computed independently of the implementation under test. |
+| **Cache hit rate is low and the cache is barely exercised.** A 10s dev-scale step measured 2.5% at 200 rps, rising to 26.6% at 2000 rps. | Not a caching bug — the key space is 20,000 sampled products × 16 tier/region combinations, so short runs rarely repeat a key. It is the **`Rng.skewed()`** gap below, now with evidence: without a real hot subset the cache cannot be measured meaningfully, and neither can coherence cost. |
 | **`Rng.skewed()` is near-uniform.** The top 1% of the catalog takes 1.52% of draws against 1% for uniform. `MANIFEST.json` publishes "zipf-ish" as a recorded run condition. | Without a hot subset, cache-hit rate is not a meaningful measurement. Fixing it means a real Zipf inverse-CDF and regenerating both datasets. |
-| **`Server-Timing` emits only `total`.** OBS-001 requires data-access and compute phases; OBS-002 requires cache status; neither exists. | Blocks any claim that decomposes where time goes — which is most of what the harness is for. |
+| **The quote endpoint still emits only `total`.** The product endpoint now decomposes data-access, cache status and total; the quote path does not. | OBS-001 applies to both endpoints. |
 | **`loyaltyBalance` is read but never applied.** QUOTE-004 says "read and applied". | Needs a normative redemption policy in SPEC.md first; inventing one only in Harper would make implementations non-equivalent. |
 | **Stride sampling still floors.** `Math.floor(total/limit)` can leave the tail of a table unreachable. | Smaller than the prefix bug it replaced, but the same class. |
 | **Upsert does not restore exact membership.** Reloading over a populated instance leaves rows the new dataset does not contain. | Matters for trial restore; the snapshot path sidesteps it today. |

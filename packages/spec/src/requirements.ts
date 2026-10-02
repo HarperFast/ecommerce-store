@@ -9,7 +9,7 @@
  */
 
 export type Level = 'MUST' | 'SHOULD' | 'MAY';
-export type Area = 'DATA' | 'QUOTE' | 'PDP' | 'WRITE' | 'OBS';
+export type Area = 'DATA' | 'CACHE' | 'QUOTE' | 'PDP' | 'WRITE' | 'OBS';
 
 export interface Requirement {
 	id: string;
@@ -29,6 +29,11 @@ export const REQUIREMENTS: readonly Requirement[] = [
 	r('DATA-003', 'DATA', 'MUST', 'Every implementation loads the same versioned dataset, checksum-verified'),
 	r('DATA-004', 'DATA', 'MUST', 'One dataset size, with a working set that does not fit in memory'),
 	r('DATA-005', 'DATA', 'MUST', 'The dataset is generated deterministically and version controlled'),
+
+	// §3 Caching — derived, bounded, correctly keyed.
+	r('CACHE-001', 'CACHE', 'MUST', 'Caches are derived: dropping every cache changes no response body, only latency'),
+	r('CACHE-002', 'CACHE', 'MUST', 'Every cached value is bounded by FRESH_MS, by invalidation or expiry, and says which'),
+	r('CACHE-003', 'CACHE', 'MUST', 'A cache key includes every dimension the cached value varies by'),
 
 	// §4 Cart quote
 	r('QUOTE-001', 'QUOTE', 'MUST', 'Every response is unique to its cart; response-level caching is a conformance failure'),

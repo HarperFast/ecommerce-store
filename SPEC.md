@@ -61,7 +61,15 @@ Reaching eight tables required three judgment calls. Each is recorded because ea
 2. **Related items are product ids on `product`**, which still fan out to further `product` reads. Depth preserved.
 3. **Shipping and tax share one `rate` table**, discriminated by kind. They are looked up identically — a keyed read returning a rate — and splitting them would buy a table, not a behaviour.
 
-`DATA-001` **MUST** — An implementation uses exactly these eight logical entities. A stack MAY represent them differently where its idiom demands (a normalized schema may split embedded line items into their own relation), and MUST then document the mapping. What it MUST NOT do is pre-join or denormalize them into a shape that removes a read the specification requires — that is the measurement, not an optimization.
+`DATA-001` **MUST** — An implementation uses exactly these eight logical entities **as its source of truth**. A stack MAY represent them differently where its idiom demands (a normalized schema may split embedded line items into their own relation), and MUST then document the mapping. What it MUST NOT do is pre-join or denormalize its *source of truth* into a shape that removes a read the specification requires — that is the measurement, not an optimization.
+
+**Derived caches are permitted and expected**, and are not a violation of the above: a cache holds a copy, not the truth. The distinction is testable — deleting every cache must change no response, only its latency. A separated stack caching the product aggregate in Redis and a collapsed stack caching it in-process are doing the same thing; what differs is the cost of keeping it coherent, which is what §6 exists to measure.
+
+### Caching
+
+- `CACHE-001` **MUST** — Caches are **derived**. Dropping every cache changes no response body, only latency. No cached value is authoritative, and nothing is served from a cache that could not be recomputed from the eight entities.
+- `CACHE-002` **MUST** — Every cached value is bounded by `FRESH_MS` (§6) — by explicit invalidation on write, by expiry, or both. An implementation states which mechanism it relies on.
+- `CACHE-003` **MUST** — A cache key includes every dimension the cached value varies by. Serving a value keyed on fewer dimensions than it varies by is a correctness failure, not a cache tuning choice.
 
 ### Invariants
 
@@ -143,16 +151,18 @@ A steady, low-rate stream of inventory and price updates against the same record
 
 **Not an endpoint under test.** Its own latency is not a headline metric. It exists so that caches have to stay coherent with their source of truth — a read-only workload lets a separated stack's cache fill once and never invalidate, which is not a cache any real store operates.
 
-- `WRITE-001` **MUST** — The writer updates `inventory` quantities and `variant` prices against records within the read path's working set, at a configured steady rate.
+- `WRITE-001` **MUST** — The writer updates `inventory` quantities and `variant` prices against records within the read path's working set, at a configured steady rate, **through the application's write surface**. A write made directly to the datastore updates the source of truth while invalidating nothing, so the cache converges only on expiry and the coherence cost this section exists to measure is never paid. A separated stack's write path has to evict its cache key for the same reason; this is the same work on the other architecture.
 - `WRITE-002` **MUST** — A committed write is observable on the product aggregate (§5) within `FRESH_MS`, and in quote pricing (§4) within `FRESH_MS`.
 - `WRITE-003` **MUST** — No implementation may satisfy `WRITE-002` by disabling caching. Measured cache-hit rates are recorded with every run precisely so that this is visible.
 - `WRITE-004` **MUST** — The write stream is identical in rate and key distribution for every target. It is not a per-target tuning budget.
 
 ### `FRESH_MS`
 
-The coherence budget: how stale a read may be after a write commits. **Unset until the first comparison establishes an achievable value.** It is a property of the benchmark rather than of any stack, so it is set once, applied to every target, and recorded with the results.
+The coherence budget: how stale a read may be after a write commits. It is a property of the benchmark rather than of any stack, so it is set once, applied to every target, and recorded with the results.
 
-Setting it too tight makes the benchmark a cache-invalidation test; too loose and a stack can serve arbitrarily stale data for free. It is deliberately not guessed here.
+**Provisionally 1000 ms**, pending the first comparison. The figure is now meaningful rather than arbitrary because there is a mechanism behind it: a write invalidates synchronously before it returns, so a read issued after a completed write is already fresh on a single node. The budget exists for the window that concurrency and replication open, not for the happy path. An implementation that meets it only by expiry rather than invalidation must say so (`CACHE-002`).
+
+Setting it too tight makes the benchmark a cache-invalidation test; too loose and a stack can serve arbitrarily stale data for free.
 
 ---
 

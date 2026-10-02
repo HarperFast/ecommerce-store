@@ -50,7 +50,12 @@ const OPS_URL = argOf('ops', 'http://localhost:9925');
 const OPS_AUTH = process.env.HDB_ADMIN_USERNAME
 	? `Basic ${Buffer.from(`${process.env.HDB_ADMIN_USERNAME}:${process.env.HDB_ADMIN_PASSWORD ?? ''}`).toString('base64')}`
 	: null;
-const DATASET = argOf('dataset', join(import.meta.dirname, '..', 'dataset'));
+const SCALE = argOf('scale', 'dev');
+// Scale-aware: `dev` is committed raw, `bench` is expanded by scripts/prepare-dataset.mjs.
+// The old default pointed at the pre-split layout and simply did not exist.
+const DATASET = argOf('dataset', SCALE === 'dev'
+	? join(import.meta.dirname, '..', 'dataset', 'dev')
+	: join(import.meta.dirname, '..', '.work', 'dataset', SCALE));
 const RATES = argOf('rates', '25,50,100,200').split(',').map(Number);
 const DURATION = Number(argOf('duration', '15'));
 const WARMUP = Number(argOf('warmup', '10'));
@@ -122,6 +127,7 @@ async function step({ rate, seconds, nextRequest, nextWrite, writeRate, label })
 	let writesIssued = 0;
 	let shed = 0;
 	let writeFailures = 0;
+	let invalidations = 0;
 	const totalRequests = Math.round(rate * seconds);
 	const totalWrites = Math.round(writeRate * seconds);
 
@@ -178,18 +184,19 @@ async function step({ rate, seconds, nextRequest, nextWrite, writeRate, label })
 	const requestInterval = 1000 / rate;
 	const writeInterval = writeRate > 0 ? 1000 / writeRate : Infinity;
 
-	const postWrite = async (body) => {
+	const postWrite = async (write) => {
 		try {
-			const response = await fetch(OPS_URL, {
+			const response = await fetch(write.url, {
 				method: 'POST',
-				headers: { 'content-type': 'application/json', ...(OPS_AUTH ? { authorization: OPS_AUTH } : {}) },
-				body: JSON.stringify(body),
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify(write.body),
 			});
 			const result = await response.json();
-			// A 401, or an update that silently skipped a nonexistent record, means the
-			// coherence workload did not happen. Writes are not timed, but they must be
+			// A write that landed but invalidated nothing did not do the job either: the cache
+			// would serve the old value until expiry. Writes are not timed, but they must be
 			// COUNTED — a run whose writes all failed is not the run it claims to be.
-			if (!response.ok || (result.skipped_hashes?.length ?? 0) > 0) writeFailures++;
+			if (!response.ok) writeFailures++;
+			else invalidations += result.invalidated ?? 0;
 		} catch {
 			writeFailures++;
 		}
@@ -246,6 +253,10 @@ async function step({ rate, seconds, nextRequest, nextWrite, writeRate, label })
 	const generatorCpuSeconds = (cpu.user + cpu.system) / 1e6;
 
 	const ok = samples.filter((s) => s.status >= 200 && s.status < 300);
+	// Measured, not assumed. WRITE-003 forbids achieving freshness by disabling caching, and
+	// a hit rate of zero is exactly what that looks like in the numbers.
+	const cacheable = ok.filter((s) => s.serverTiming?.includes('cache;desc='));
+	const hits = cacheable.filter((s) => s.serverTiming.includes('cache;desc=hit')).length;
 	// Reported latency is SCHEDULED-arrival to completion. Service time is kept too, and a
 	// large gap between them means the generator queued, not that the target was slow.
 	const latencies = ok.map((s) => s.arrivalMs ?? s.ms).sort((a, b) => a - b);
@@ -262,6 +273,9 @@ async function step({ rate, seconds, nextRequest, nextWrite, writeRate, label })
 		shed,
 		writesIssued,
 		writeFailures,
+		// Cache entries invalidated by this step's writes. The invalidation fan-out is the cost
+		// SPEC.md §6 exists to measure, so it is recorded rather than inferred.
+		invalidations,
 		// Requests still outstanding when the drain deadline expired. They are absent from the
 		// latency distribution, so a non-zero value means the tail is censored.
 		outstandingAtDeadline: outstanding,
@@ -276,6 +290,8 @@ async function step({ rate, seconds, nextRequest, nextWrite, writeRate, label })
 		p90: quantile(latencies, 0.9),
 		p99: quantile(latencies, 0.99),
 		max: latencies.at(-1) ?? NaN,
+		cacheObserved: cacheable.length,
+		cacheHitRate: cacheable.length ? hits / cacheable.length : null,
 		p50Service: quantile(serviceLatencies, 0.5),
 		p99Service: quantile(serviceLatencies, 0.99),
 		generatorCpuSeconds,
@@ -310,7 +326,7 @@ const [cartIds, productIds, skus, inventoryIds] = await Promise.all([
 ]);
 
 const nextRequest = makeRequestFactory({ baseUrl: BASE_URL, cartIds, productIds, quoteShare: QUOTE_SHARE });
-const nextWrite = makeWriterFactory({ opsUrl: OPS_URL, skus, inventoryIds });
+const nextWrite = makeWriterFactory({ baseUrl: BASE_URL, skus, inventoryIds });
 const pid = await findHarperPid();
 
 // COLD is measured by the caller restarting the target; this harness reports the first
@@ -319,8 +335,8 @@ console.log(`warm-up ${WARMUP}s (not reported as a result)`);
 const warm = await step({ rate: RATES[0], seconds: WARMUP, nextRequest, nextWrite, writeRate: WRITE_RATE, label: 'warmup' });
 console.log(`  first response ${warm.samples[0]?.ms?.toFixed(1)}ms · ${warm.errors} errors\n`);
 
-console.log('rate   offered  achieved   p50      p90      p99      max     errors  genCPU');
-console.log('─'.repeat(82));
+console.log('rate   offered  achieved   p50      p90      p99      max     errors  genCPU  cacheHit  inval');
+console.log('─'.repeat(100));
 
 const steps = [];
 for (const rate of RATES) {
@@ -333,13 +349,16 @@ for (const rate of RATES) {
 	let flag = result.generatorCpuLoad > 0.8 ? '  ⚠ GENERATOR saturated — not a target measurement' : '';
 	if (result.shed > 0) flag += `  ⚠ shed ${result.shed} (target over capacity)`;
 	if (result.writeFailures > 0) flag += `  ⚠ ${result.writeFailures} write failures (coherence workload degraded)`;
+	if (result.cacheHitRate === 0) flag += '  ⚠ cache hit rate 0 (WRITE-003: freshness must not come from disabling caching)';
 	if (result.outstandingAtDeadline > 0) flag += `  ⚠ ${result.outstandingAtDeadline} never completed (tail censored)`;
 	console.log(
 		`${String(rate).padStart(5)}  ${String(result.issued).padStart(7)}  ` +
 			`${result.achievedRate.toFixed(1).padStart(8)}  ${result.p50.toFixed(1).padStart(7)}  ` +
 			`${result.p90.toFixed(1).padStart(7)}  ${result.p99.toFixed(1).padStart(7)}  ` +
 			`${result.max.toFixed(0).padStart(7)}  ${String(result.errors).padStart(6)}  ` +
-			`${result.generatorCpuLoad.toFixed(2).padStart(6)}${flag}`
+			`${result.generatorCpuLoad.toFixed(2).padStart(6)}  ` +
+			`${(result.cacheHitRate === null ? 'n/a' : `${(result.cacheHitRate * 100).toFixed(1)}%`).padStart(8)}  ` +
+			`${String(result.invalidations).padStart(5)}${flag}`
 	);
 }
 

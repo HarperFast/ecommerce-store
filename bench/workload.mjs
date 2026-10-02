@@ -82,7 +82,7 @@ export function makeRequestFactory({ baseUrl, cartIds, productIds, quoteShare = 
  * of truth: a read-only workload lets a cache fill once and never invalidate, which is not
  * a cache any real store operates.
  */
-export function makeWriterFactory({ opsUrl, skus, inventoryIds, seed = 7 }) {
+export function makeWriterFactory({ baseUrl, skus, inventoryIds, seed = 7 }) {
 	let state = seed >>> 0;
 	const next = () => {
 		state = (state + 0x6d2b79f5) >>> 0;
@@ -91,23 +91,31 @@ export function makeWriterFactory({ opsUrl, skus, inventoryIds, seed = 7 }) {
 		t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
 		return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
 	};
+	/**
+	 * Writes go through the APPLICATION, not the operations API.
+	 *
+	 * A direct table write updates the source of truth and invalidates nothing, so the cache
+	 * would only converge on expiry and §6's cache-coherence cost — the thing it exists to
+	 * measure — would never be paid. A separated stack's write path has to evict its Redis key
+	 * for the same reason; this is the same work on the other architecture.
+	 */
 	return function nextWrite() {
 		// Alternate price and inventory writes; both are in the read path's working set.
 		if (next() < 0.5) {
 			const sku = skus[Math.floor(next() * skus.length)];
 			return {
-				operation: 'update', database: 'data', table: 'Variant',
-				records: [{ sku, basePrice: 500 + Math.floor(next() * 40000) }],
+				url: `${baseUrl}/admin/variant/${encodeURIComponent(sku)}`,
+				body: { basePrice: 500 + Math.floor(next() * 40000) },
 			};
 		}
 		// Inventory ids are sampled from the table rather than synthesized. Synthesizing
 		// `${sku}:loc-us-east-0` named a nonexistent record for most SKUs — a SKU is stocked at
-		// only some locations — so those writes were skipped by Harper, and they never touched
-		// three of the four regions the read path reads.
+		// only some locations — so those writes were skipped, and they never touched three of
+		// the four regions the read path reads.
 		const id = inventoryIds[Math.floor(next() * inventoryIds.length)];
 		return {
-			operation: 'update', database: 'data', table: 'Inventory',
-			records: [{ id, onHand: Math.floor(next() * 400) }],
+			url: `${baseUrl}/admin/inventory/${encodeURIComponent(id)}`,
+			body: { onHand: Math.floor(next() * 400) },
 		};
 	};
 }

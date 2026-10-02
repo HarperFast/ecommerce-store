@@ -81,3 +81,28 @@ type Rate @table @export @sealed {
 	amountMinor: Int
 	basisPoints: Int
 }
+
+# ---------------------------------------------------------------------------------------
+# The cache.
+#
+# GET /product/:id is "mostly cacheable, varies by tier and region" (SPEC.md §5), so the
+# cached unit is the fully-resolved aggregate keyed by `${productId}:${tier}:${region}` —
+# 16 entries per product across 4 tiers and 4 regions.
+#
+# Filled by a sourcedFrom resolver (resources/product.js) that does the fan-out, and kept
+# coherent two ways: explicit invalidation on every write that can change it, with the TTL
+# as the backstop that bounds staleness even if an invalidation is ever missed. An
+# implementation on a separated stack puts the same aggregate in Redis with the same key;
+# what differs is what invalidating it costs, which is exactly what SPEC.md §6 measures.
+#
+# NOT @export'ed: it is an internal cache, not a public surface. Reads go through
+# /product/:id so cache status can be reported (OBS-002).
+
+type ProductView @table(expiration: 120) {
+	id: ID @primaryKey
+	productId: String @indexed
+	tier: String
+	region: String
+	payload: Any
+	assembledAt: Long
+}
