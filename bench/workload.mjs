@@ -7,9 +7,7 @@
 import { createReadStream } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
-
-const TIERS = ['standard', 'silver', 'gold', 'platinum'];
-const REGIONS = ['us-east', 'us-west', 'eu-central', 'apac'];
+import { REGION_WEIGHTS, TIER_WEIGHTS, skewedIndex, weightedPick } from '@ecommerce-store/spec';
 
 /**
  * Sample ids SPREAD ACROSS the whole table, not a prefix.
@@ -63,14 +61,23 @@ export function makeRequestFactory({ baseUrl, cartIds, productIds, quoteShare = 
 		return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
 	};
 
+	/**
+	 * Keys are drawn SKEWED, from the same distribution the dataset was built against, and
+	 * tier/region are weighted rather than uniform.
+	 *
+	 * Uniform draws over 20,000 products x 4 tiers x 4 regions is a 320,000-key space that a
+	 * short run almost never revisits — measured cache hit rate was 2.5%. A cache nobody asks
+	 * twice is a cache the benchmark cannot measure, and neither is the coherence cost of
+	 * invalidating it.
+	 */
 	return function nextRequest() {
 		if (next() < quoteShare) {
-			const id = cartIds[Math.floor(next() * cartIds.length)];
+			const id = cartIds[skewedIndex(next(), cartIds.length)];
 			return { kind: 'quote', method: 'POST', url: `${baseUrl}/cart/${id}/quote` };
 		}
-		const id = productIds[Math.floor(next() * productIds.length)];
-		const tier = TIERS[Math.floor(next() * TIERS.length)];
-		const region = REGIONS[Math.floor(next() * REGIONS.length)];
+		const id = productIds[skewedIndex(next(), productIds.length)];
+		const tier = weightedPick(TIER_WEIGHTS, next());
+		const region = weightedPick(REGION_WEIGHTS, next());
 		return { kind: 'product', method: 'GET', url: `${baseUrl}/product/${id}?tier=${tier}&region=${region}` };
 	};
 }
@@ -101,8 +108,11 @@ export function makeWriterFactory({ baseUrl, skus, inventoryIds, seed = 7 }) {
 	 */
 	return function nextWrite() {
 		// Alternate price and inventory writes; both are in the read path's working set.
+		// Writes target the SAME hot set the reads do — WRITE-001 requires the writer to work
+		// within the read path's working set. A uniform writer would mostly invalidate cold
+		// keys nobody asks for, so coherence would cost nothing and measure nothing.
 		if (next() < 0.5) {
-			const sku = skus[Math.floor(next() * skus.length)];
+			const sku = skus[skewedIndex(next(), skus.length)];
 			return {
 				url: `${baseUrl}/admin/variant/${encodeURIComponent(sku)}`,
 				body: { basePrice: 500 + Math.floor(next() * 40000) },
@@ -112,7 +122,7 @@ export function makeWriterFactory({ baseUrl, skus, inventoryIds, seed = 7 }) {
 		// `${sku}:loc-us-east-0` named a nonexistent record for most SKUs — a SKU is stocked at
 		// only some locations — so those writes were skipped, and they never touched three of
 		// the four regions the read path reads.
-		const id = inventoryIds[Math.floor(next() * inventoryIds.length)];
+		const id = inventoryIds[skewedIndex(next(), inventoryIds.length)];
 		return {
 			url: `${baseUrl}/admin/inventory/${encodeURIComponent(id)}`,
 			body: { onHand: Math.floor(next() * 400) },

@@ -8,6 +8,8 @@
  * NOTHING in generation may use Math.random, Date.now, or crypto randomness.
  */
 
+import { skewedIndex } from '@ecommerce-store/spec';
+
 /** FNV-1a, so a seed string maps to a 32-bit state deterministically across runtimes. */
 function hashSeed(seed: string): number {
 	let h = 0x811c9dc5;
@@ -67,13 +69,14 @@ export class Rng {
 	}
 
 	/**
-	 * Zipf-ish index into [0, n). Produces the access skew the read workload and the
-	 * background writer share — without a hot subset, cache-hit rate is not a meaningful
-	 * measurement.
+	 * A skewed index into [0, n), using the shared access distribution.
+	 *
+	 * Delegates to `@ecommerce-store/spec` rather than defining its own curve: the dataset's
+	 * hot products and the workload's hot products MUST be the same products, and two copies
+	 * of a formula is how they stop being. The previous local version used an exponent of
+	 * 1.1, which is very nearly uniform — it gave the top 1% of the catalog 1.52% of draws.
 	 */
-	skewed(n: number, exponent = 1.1): number {
-		const u = this.next();
-		const index = Math.floor(n * Math.pow(u, exponent));
-		return Math.min(index, n - 1);
+	skewed(n: number): number {
+		return skewedIndex(this.next(), n);
 	}
 }

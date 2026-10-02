@@ -18,6 +18,7 @@ import { Rng } from './prng.ts';
 import {
 	SCALES, carts, customers, inventory, locations, products, promotions, rates, variantShape, variants,
 } from './generate.ts';
+import { ACCESS_SKEW, REGION_WEIGHTS, TIER_WEIGHTS, skewExponent } from '@ecommerce-store/spec';
 import { GENERATOR_VERSION, type DatasetManifest, type Table } from './index.ts';
 
 /**
@@ -99,11 +100,23 @@ const manifest: DatasetManifest = {
 	files,
 	distributions: {
 		variantsPerProduct: 'long-tailed, 1-20',
-		cartSize: 'long-tailed, 1-25',
+		// Declared AND measured. The declared weights were previously published while the
+		// generator silently dropped colliding SKUs, so shipped carts were ~13% smaller than
+		// the manifest said.
+		cartSize: 'long-tailed, 1-25 distinct SKUs; collisions redrawn, not dropped',
 		locationsPerSku: '1-6 of 8',
 		tier: 'standard 60 / silver 25 / gold 12 / platinum 3',
 		outOfStockRate: 0.12,
-		accessSkew: 'zipf-ish, exponent 1.1, over product index',
+		// Fully specified: P(index < x*n) = x ** (1/alpha). Both the dataset and the load
+		// generator draw from this, so the hot products are the same on both sides.
+		accessSkew: {
+			form: 'power law over product index',
+			headShare: ACCESS_SKEW.headShare,
+			headMass: ACCESS_SKEW.headMass,
+			alpha: Number(skewExponent().toFixed(6)),
+		},
+		requestTierWeights: Object.fromEntries(TIER_WEIGHTS),
+		requestRegionWeights: Object.fromEntries(REGION_WEIGHTS),
 	},
 };
 

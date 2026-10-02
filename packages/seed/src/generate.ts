@@ -231,10 +231,23 @@ export function* carts(scale: Scale, counts: number[], rng: Rng): Generator<Reco
 		for (let l = 0; l < size; l++) {
 			// Skewed toward a hot subset of the catalog: this is the access pattern the read
 			// workload and the background writer must share for cache-hit rate to mean anything.
-			const productIndex = rng.skewed(scale.products);
-			const variantIndex = rng.int(0, counts[productIndex] - 1);
-			const s = sku(productIndex, variantIndex);
-			if (seen.has(s)) continue;
+			//
+			// Collisions are REDRAWN, not dropped. Dropping them made carts systematically
+			// smaller than the declared CART_SIZE distribution — and the stronger the skew, the
+			// more collisions, so the drift grew exactly as the hot set got hotter (mean 3.30
+			// lines against a declared 3.81). Cart size drives the quote's fan-out, which is the
+			// primary measured endpoint, so the manifest has to describe the data it ships.
+			let s: string | null = null;
+			for (let attempt = 0; attempt < 16 && s === null; attempt++) {
+				const productIndex = rng.skewed(scale.products);
+				const variantIndex = rng.int(0, counts[productIndex] - 1);
+				const candidate = sku(productIndex, variantIndex);
+				if (!seen.has(candidate)) s = candidate;
+			}
+			// A cart that genuinely cannot find a distinct SKU in 16 draws keeps the lines it
+			// has; at every scale here that is vanishingly rare, and the alternative is an
+			// unbounded loop.
+			if (s === null) break;
 			seen.add(s);
 			lines.push({ sku: s, quantity: rng.weighted([[1, 60], [2, 22], [3, 10], [5, 6], [10, 2]] as const) });
 		}

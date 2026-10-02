@@ -10,5 +10,8 @@
   "scripts": {
     "seed": "node src/cli.ts"
   },
-  "devDependencies": {}
+  "devDependencies": {},
+  "dependencies": {
+    "@ecommerce-store/spec": "*"
+  }
 }

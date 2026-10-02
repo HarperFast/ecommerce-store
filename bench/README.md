@@ -37,7 +37,9 @@ From the measurement rules in the benchmarks README:
 - **In-flight ceiling.** Past the ceiling, arrivals are *shed* and counted. A step that sheds exceeded the target's capacity — its achieved rate is a lower bound, not a measurement.
 - **Raw samples retained**, so intervals can be applied later without re-running.
 - **Correctness guards.** The quote is deterministic by construction (`QUOTE-008`), which is the ground-truth check: a throughput-only benchmark reports a silently wrong quote as a result.
-- **Background writes** run concurrently with reads, so caches have to stay coherent rather than filling once and never invalidating.
+- **Background writes** run concurrently with reads, so caches have to stay coherent rather than filling once and never invalidating. Writes go through the application's write surface, not the datastore — a direct write invalidates nothing, and the coherence cost is the point.
+- **A real access skew.** Keys are drawn from the distribution defined in `@ecommerce-store/spec` — the same one the dataset was built against, so the dataset's hot products and the workload's hot products are the same products. Tier and region are weighted to the seeded customer population rather than drawn uniformly.
+- **Measured cache-hit rate and invalidation fan-out**, recorded per step. A hit rate of zero is flagged: that is what `WRITE-003`'s forbidden shortcut — achieving freshness by disabling caching — looks like in the numbers.
 
 ## What it does NOT implement — and what therefore may not be claimed
 
@@ -46,6 +48,12 @@ From the measurement rules in the benchmarks README:
 - **No per-target CPU breakdown.** Harper is one process so the split that matters in an assembled stack (framework vs database vs cache) has no analogue yet. `targetCpuSeconds` is captured but is a single number.
 - **No cold-start measurement.** The run lifecycle wants cold, warm and hot as three separate numbers. The harness reports the warm-up's first response, which is not the same thing.
 - **No trial restore.** The workload includes writes, so state does not survive between trials. Every trial should start from a restored dataset; right now it does not, so repeated runs drift.
+
+## Why the access distribution is load-bearing
+
+An earlier version drew keys uniformly over 20,000 products x 4 tiers x 4 regions — a 320,000-key space a short run almost never revisits. Measured cache-hit rate was **2.5%**. A cache nobody asks for twice cannot be measured, and neither can the cost of invalidating it, so `WRITE-003` and most of §6 were unmeasurable without anyone noticing.
+
+With the shared skew (1% of the catalog takes 50% of traffic) the same workload measures **77.7% at 200 rps rising to 89.3% at 2000 rps**. Nothing about the application changed.
 
 ## Current numbers, and why they are not a result
 
