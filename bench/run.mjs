@@ -31,6 +31,23 @@ import { cpus, totalmem, platform, release } from 'node:os';
 import { makeRequestFactory, makeWriterFactory, sampleIds } from './workload.mjs';
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * The commit that produced the run.
+ *
+ * "Record exact run conditions" is a measurement rule, and a result that cannot be tied to
+ * the code that produced it cannot be reproduced or disputed. A dirty tree is recorded as
+ * such rather than silently reported as the commit it is based on.
+ */
+async function codeVersion() {
+	try {
+		const { stdout: sha } = await execFileAsync('git', ['rev-parse', 'HEAD']);
+		const { stdout: dirty } = await execFileAsync('git', ['status', '--porcelain']);
+		return { commit: sha.trim(), dirty: dirty.trim().length > 0 };
+	} catch {
+		return { commit: null, dirty: null };
+	}
+}
 const args = process.argv.slice(2);
 const argOf = (name, fallback) => {
 	const i = args.indexOf(`--${name}`);
@@ -371,6 +388,7 @@ await writeFile(
 		{
 			// Exact run conditions, recorded with the result — not reconstructed later.
 			conditions: {
+				code: await codeVersion(),
 				target: BASE_URL,
 				dataset: { scale: manifest.scale, seed: manifest.seed, generatorVersion: manifest.generatorVersion, files: manifest.files },
 				host: { cpus: cpus().length, model: cpus()[0]?.model, totalmemGiB: +(totalmem() / 1024 ** 3).toFixed(1), platform: platform(), release: release() },

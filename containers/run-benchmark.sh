@@ -15,7 +15,31 @@
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
-COMPOSE="docker compose -f compose.yaml"
+
+# Resolve the container CLI rather than assuming `docker`.
+#
+# On a Podman host `docker` is commonly a shell ALIAS, which exists in an interactive shell
+# and does not exist inside a script — so this failed with "docker: command not found" only
+# when run non-interactively, which is the only way it is ever actually run.
+if command -v docker >/dev/null 2>&1; then
+  CONTAINER_CLI=docker
+elif command -v podman >/dev/null 2>&1; then
+  CONTAINER_CLI=podman
+else
+  echo "need docker or podman on PATH" >&2
+  exit 1
+fi
+COMPOSE="$CONTAINER_CLI compose -f compose.yaml"
+
+# Load the local container settings — the loader and the write stream both authenticate
+# against the operations API, which `harper run` requires. Sourcing this by hand is why it
+# worked interactively and failed the moment it ran unattended.
+if [ -f .env ]; then
+  set -a; . ./.env; set +a
+else
+  echo "containers/.env not found — copy containers/.env.example and set a password" >&2
+  exit 1
+fi
 
 SCALE="${SCALE:-dev}"
 RATES="${RATES:-400,800,1200,1600,2400}"

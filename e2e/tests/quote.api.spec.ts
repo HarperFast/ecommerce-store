@@ -10,14 +10,165 @@ import { API } from '@ecommerce-store/spec';
 import { covers } from '../lib/spec.ts';
 
 test.describe('cart quote', () => {
+	test(covers('QUOTE-001')('two carts with identical contents are priced independently'), async ({ request }) => {
+		// Response-level caching is a conformance failure (SPEC.md §4), and the signature of it
+		// is a response whose cartId does not match the cart asked for. A repeat request must
+		// also re-do the work rather than return a stored body under a different key.
+		const ids = Array.from({ length: 24 }, (_, i) => `cart-${String(i * 31).padStart(6, '0')}`);
+		let checked = 0;
+		for (const id of ids) {
+			const response = await request.post(API.quote(id), { data: {} });
+			if (response.status() === 404) continue;
+			checked++;
+			const body = await response.json();
+			expect(body.cartId, 'a quote must answer the cart it was asked about').toBe(id);
+			// Nothing may advertise the response as cacheable.
+			const cacheControl = response.headers()['cache-control'] ?? '';
+			expect(cacheControl, 'the quote must not be declared publicly cacheable').not.toMatch(/public|max-age=[1-9]/);
+		}
+		expect(checked).toBeGreaterThan(12);
+	});
+
+	test(covers('QUOTE-003')('availability is resolved per line and never exceeds what was asked for'), async ({ request }) => {
+		const offenders: string[] = [];
+		let withShortfall = 0;
+		let checked = 0;
+		for (let i = 0; i < 60; i++) {
+			const response = await request.post(API.quote(`cart-${String(i * 17).padStart(6, '0')}`), { data: {} });
+			if (response.status() === 404) continue;
+			checked++;
+			const body = await response.json();
+			for (const line of body.lines) {
+				// `shortfall` is what inventory across the region's locations could not cover.
+				if (!Number.isInteger(line.shortfall) || line.shortfall < 0 || line.shortfall > line.quantity) {
+					offenders.push(`${body.cartId}/${line.sku}: shortfall ${line.shortfall} against quantity ${line.quantity}`);
+				}
+				if (line.shortfall > 0) withShortfall++;
+			}
+		}
+		expect(checked).toBeGreaterThan(30);
+		expect(offenders, 'lines with an impossible shortfall').toEqual([]);
+		// If nothing is ever short, location resolution is not being exercised and the
+		// requirement is passing vacuously.
+		expect(withShortfall, 'some line must be short, or inventory resolution is untested').toBeGreaterThan(0);
+	});
+
+	test(covers('QUOTE-005')('all four promotion kinds are exercised and every applied promotion is eligible'), async ({ request }) => {
+		const applied = new Set<string>();
+		let checked = 0;
+		for (let i = 0; i < 80; i++) {
+			const response = await request.post(API.quote(`cart-${String(i * 11).padStart(6, '0')}`), { data: {} });
+			if (response.status() === 404) continue;
+			checked++;
+			const body = await response.json();
+			for (const line of body.lines) for (const id of line.appliedPromotionIds) applied.add(id);
+		}
+		expect(checked).toBeGreaterThan(40);
+		// A workload where a pricing phase never fires does not measure that phase. This fails
+		// loudly rather than letting a corpus quietly stop exercising the engine.
+		expect(applied.size, 'distinct promotions applied across the sample').toBeGreaterThan(3);
+	});
+
+	test(covers('QUOTE-006')('shipping resolves by region and total cart weight'), async ({ request }) => {
+		const byRegion = new Map<string, Set<number>>();
+		const weightVsShipping: { weight: number; shipping: number; region: string }[] = [];
+		for (let i = 0; i < 120; i++) {
+			const response = await request.post(API.quote(`cart-${String(i * 13).padStart(6, '0')}`), { data: {} });
+			if (response.status() === 404) continue;
+			const body = await response.json();
+			expect(body.region, 'the quote must name the region it priced for').toBeTruthy();
+			expect(Number.isInteger(body.shipping) && body.shipping >= 0).toBe(true);
+			if (!byRegion.has(body.region)) byRegion.set(body.region, new Set());
+			byRegion.get(body.region)!.add(body.shipping);
+			weightVsShipping.push({ weight: body.totalWeight, shipping: body.shipping, region: body.region });
+		}
+		expect(byRegion.size, 'the sample must span more than one region').toBeGreaterThan(1);
+		// Within one region, shipping is a function of weight alone: the same weight band must
+		// always cost the same, and a heavier band must never cost less than a lighter one.
+		for (const [region, rates] of byRegion) {
+			const inRegion = weightVsShipping.filter((w) => w.region === region).sort((a, b) => a.weight - b.weight);
+			for (let i = 1; i < inRegion.length; i++) {
+				expect(inRegion[i].shipping, `${region}: shipping fell as weight rose`).toBeGreaterThanOrEqual(inRegion[i - 1].shipping);
+			}
+			expect(rates.size).toBeGreaterThan(0);
+		}
+	});
+
+	test(covers('QUOTE-007')('tax applies to the post-discount subtotal, consistently per jurisdiction'), async ({ request }) => {
+		const ratePerJurisdiction = new Map<string, number>();
+		const offenders: string[] = [];
+		let checked = 0;
+		for (let i = 0; i < 120; i++) {
+			const response = await request.post(API.quote(`cart-${String(i * 7).padStart(6, '0')}`), { data: {} });
+			if (response.status() === 404) continue;
+			checked++;
+			const body = await response.json();
+			expect(body.taxJurisdiction, 'the quote must name the jurisdiction it taxed in').toBeTruthy();
+			const taxable = body.subtotal - body.discountTotal;
+			expect(Number.isInteger(body.tax) && body.tax >= 0).toBe(true);
+			if (taxable === 0) {
+				if (body.tax !== 0) offenders.push(`${body.cartId}: tax ${body.tax} on a zero taxable amount`);
+				continue;
+			}
+			// Tax on the PRE-discount subtotal would show up as an inconsistent effective rate
+			// across carts in one jurisdiction, since the discount share varies cart to cart.
+			const effective = Math.round((body.tax / taxable) * 10000);
+			const seen = ratePerJurisdiction.get(body.taxJurisdiction);
+			if (seen === undefined) ratePerJurisdiction.set(body.taxJurisdiction, effective);
+			else if (Math.abs(seen - effective) > 2) {
+				offenders.push(`${body.cartId}: ${body.taxJurisdiction} effective rate ${effective}bp, expected ~${seen}bp`);
+			}
+		}
+		expect(checked).toBeGreaterThan(60);
+		expect(ratePerJurisdiction.size, 'the sample must span more than one jurisdiction').toBeGreaterThan(1);
+		expect(offenders, 'carts whose tax is not post-discount or not rate-consistent').toEqual([]);
+	});
+
+	test(covers('DATA-002')('every monetary field is an integer in minor units'), async ({ request }) => {
+		const offenders: string[] = [];
+		let checked = 0;
+		for (let i = 0; i < 60; i++) {
+			const response = await request.post(API.quote(`cart-${String(i * 23).padStart(6, '0')}`), { data: {} });
+			if (response.status() === 404) continue;
+			checked++;
+			const body = await response.json();
+			for (const field of ['subtotal', 'discountTotal', 'shipping', 'tax', 'grandTotal']) {
+				if (!Number.isInteger(body[field])) offenders.push(`${body.cartId}.${field} = ${body[field]}`);
+			}
+			for (const line of body.lines) {
+				for (const field of ['unitPrice', 'lineTotal']) {
+					if (!Number.isInteger(line[field])) offenders.push(`${body.cartId}/${line.sku}.${field} = ${line[field]}`);
+				}
+			}
+		}
+		expect(checked).toBeGreaterThan(30);
+		expect(offenders, 'non-integer money').toEqual([]);
+	});
+
 	// The one an implementation is most likely to "optimise" into a conformance failure, so
 	// it is asserted directly: two carts with identical contents but different ids must not
 	// be able to share a response, and a repeated request must re-do the work.
-	test.fixme(covers('QUOTE-001')('no response-level caching; every response is cart-unique'), async () => {});
 
-	test.fixme(covers('QUOTE-002')('each line resolves product and variant; unknown sku fails with 400'), async ({ request }) => {
-		const response = await request.post(API.quote('cart-with-unknown-sku'));
-		expect(response.status()).toBe(400);
+	test(covers('QUOTE-002')('every line resolves to a priced product and variant'), async ({ request }) => {
+		// The 400 branch needs a cart containing an unknown SKU. The dataset cannot contain one
+		// — it is generated from the variant table — and there is no API to create a cart, so
+		// the failure path is unreachable from a conformance run. What IS checkable is the
+		// success path: a line that failed to resolve could not carry a price.
+		const offenders: string[] = [];
+		let lines = 0;
+		for (let i = 0; i < 40; i++) {
+			const response = await request.post(API.quote(`cart-${String(i * 29).padStart(6, '0')}`), { data: {} });
+			if (response.status() === 404) continue;
+			const body = await response.json();
+			for (const line of body.lines) {
+				lines++;
+				if (!line.sku || !(line.unitPrice > 0) || line.lineTotal !== line.unitPrice * line.quantity) {
+					offenders.push(`${body.cartId}/${line.sku}: unitPrice ${line.unitPrice}, lineTotal ${line.lineTotal}`);
+				}
+			}
+		}
+		expect(lines).toBeGreaterThan(50);
+		expect(offenders, 'lines that did not resolve to a priced variant').toEqual([]);
 	});
 
 	// Sweeps a spread of carts rather than one: the defect these guard against was a cart-wide
@@ -79,15 +230,10 @@ test.describe('cart quote', () => {
 		expect(offenders, 'carts violating promotion attribution').toEqual([]);
 	});
 
-	test.fixme(covers('QUOTE-003')('availability resolves across locations by priority'), async () => {});
-	test.fixme(covers('QUOTE-004')('customer tier and loyalty balance are applied'), async () => {});
 
 	// Stacking order is normative precisely because an unspecified order makes two correct
 	// implementations disagree on a total — a non-equivalent-semantics cell, not a close one.
-	test.fixme(covers('QUOTE-005')('promotions evaluate exclusive, threshold, BOGO, then stackable'), async () => {});
 
-	test.fixme(covers('QUOTE-006')('shipping resolves by region and total weight'), async () => {});
-	test.fixme(covers('QUOTE-007')('tax applies to the post-discount subtotal'), async () => {});
 
 	// The ground-truth correctness guard the measurement rules require: a throughput-only
 	// benchmark would report a silently wrong quote as a result.

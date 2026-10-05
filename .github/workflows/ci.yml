@@ -50,6 +50,10 @@ jobs:
       - name: The promotion index never excludes an eligible promotion
         run: npm run check:index
 
+      # DATA-001/002/003/005 are properties of the committed artifact, not of a request.
+      - name: The dataset matches its manifest and is not pre-joined
+        run: npm run check:dataset
+
       - name: Typecheck
         run: npm run typecheck
 

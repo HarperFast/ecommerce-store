@@ -43,11 +43,23 @@ export class quote extends Resource {
 
 	async post() {
 		const started = process.hrtime.bigint();
+		// Phase accounting — OBS-001 requires data access and compute to be separable, not just
+		// a total. Without it a result cannot say whether an advantage is in the datastore or
+		// in the application, which is most of what the comparison is for.
+		let dataNs = 0n;
+		const timed = async (fn) => {
+			const t0 = process.hrtime.bigint();
+			try {
+				return await fn();
+			} finally {
+				dataNs += process.hrtime.bigint() - t0;
+			}
+		};
 		const target = this.getId ? { id: this.getId() } : this;
 		const cartId = target.id ?? this.id;
 
 		// --- wave 1: the cart -------------------------------------------------------------
-		const cart = await Cart.get(cartId);
+		const cart = await timed(() => Cart.get(cartId));
 		if (!cart) {
 			const error = new Error('cart not found');
 			error.statusCode = 404;
@@ -57,17 +69,19 @@ export class quote extends Resource {
 		const { locations, rates } = await loadStatic();
 
 		// --- wave 2: product and variant per line, plus the customer ----------------------
-		const [customer, resolved] = await Promise.all([
-			Customer.get(cart.customerId),
-			Promise.all(
-				cart.lines.map(async (line) => {
-					const variant = await Variant.get(line.sku);
-					if (!variant) return { line, variant: null, product: null };
-					const product = await Product.get(variant.productId);
-					return { line, variant, product };
-				})
-			),
-		]);
+		const [customer, resolved] = await timed(() =>
+			Promise.all([
+				Customer.get(cart.customerId),
+				Promise.all(
+					cart.lines.map(async (line) => {
+						const variant = await Variant.get(line.sku);
+						if (!variant) return { line, variant: null, product: null };
+						const product = await Product.get(variant.productId);
+						return { line, variant, product };
+					})
+				),
+			])
+		);
 
 		const unknown = resolved.find((r) => !r.variant || !r.product);
 		if (unknown) {
@@ -85,7 +99,8 @@ export class quote extends Resource {
 		const regionLocations = locations.filter((l) => l.region === customer.region);
 
 		// --- wave 3: inventory per line across fulfillment locations ----------------------
-		await Promise.all(
+		await timed(() =>
+			Promise.all(
 			resolved.map(async (entry) => {
 				const rows = await Promise.all(regionLocations.map((l) => Inventory.get(`${entry.line.sku}:${l.id}`)));
 				// Honour location priority: consume from the highest-priority location first.
@@ -101,6 +116,7 @@ export class quote extends Resource {
 				entry.allocation = allocation;
 				entry.shortfall = remaining;
 			})
+			)
 		);
 
 		// --- wave 4: eligible promotions by tier, sku, and category -----------------------
@@ -113,7 +129,7 @@ export class quote extends Resource {
 		const subtotal = lines.reduce((sum, l) => sum + l.unitPrice * l.quantity, 0);
 
 		const categoryIds = [...new Set(lines.flatMap((l) => l.categoryIds))];
-		const candidateRows = await collectPromotions(customer.tier, categoryIds);
+		const candidateRows = await timed(() => collectPromotions(customer.tier, categoryIds));
 		const candidates = [];
 		for (const line of lines) {
 			for (const promotion of candidateRows) {
@@ -130,11 +146,26 @@ export class quote extends Resource {
 		const shipping = resolveShipping(rates, customer.region, totalWeight);
 		const tax = resolveTax(rates, customer.taxJurisdiction, Math.max(0, subtotal - discountTotal));
 
-		const elapsed = Number(process.hrtime.bigint() - started) / 1e6;
-		this.getContext()?.responseHeaders?.set('Server-Timing', `total;dur=${elapsed.toFixed(2)}`);
+		const totalMs = Number(process.hrtime.bigint() - started) / 1e6;
+		const dataMs = Number(dataNs) / 1e6;
+		this.getContext()?.responseHeaders?.set(
+			'Server-Timing',
+			// The quote is deliberately not response-cacheable (QUOTE-001), so its cache status
+			// is always `miss` — stated rather than omitted, so a run record can tell "not
+			// cached" apart from "not instrumented".
+			`cache;desc=miss, data;dur=${dataMs.toFixed(2)}, compute;dur=${Math.max(0, totalMs - dataMs).toFixed(2)}, total;dur=${totalMs.toFixed(2)}`
+		);
 
 		return {
 			cartId,
+			// Echoed so the response is self-verifying: shipping resolves by region and tax by
+			// jurisdiction, and without naming them a conformance test can only assert that
+			// SOME number came back. A quote nobody can check is the shape of defect this
+			// specification exists to prevent.
+			tier: customer.tier,
+			region: customer.region,
+			taxJurisdiction: customer.taxJurisdiction,
+			totalWeight,
 			lines: lines.map((line, i) => ({
 				sku: line.sku,
 				quantity: line.quantity,

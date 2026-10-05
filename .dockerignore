@@ -1,0 +1,22 @@
+# The build context is sent to the daemon in full on every build, whether or not the
+# Dockerfile COPYs it. Without this the context was 868 MB and climbing — .git (322 MB),
+# node_modules (319 MB), the committed dataset (333 MB) and the 4.5 GB expansion under
+# .work/, none of which the image needs.
+.git/
+.github/
+node_modules/
+e2e/node_modules/
+*.tsbuildinfo
+
+# The dataset is loaded over the operations API after the container is up, never baked in.
+dataset/
+.work/
+
+# Harness output, local state, agent scratch.
+bench/results/
+containers/.snapshots/
+containers/.env
+.claude/
+e2e/test-results/
+e2e/playwright-report/
+.DS_Store
