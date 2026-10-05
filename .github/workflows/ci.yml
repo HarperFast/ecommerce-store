@@ -44,6 +44,12 @@ jobs:
       - name: Every MUST has a test
         run: npm run check:coverage
 
+      # The promotion index narrows 5,000 rows to a candidate set. If that narrowing can ever
+      # EXCLUDE an eligible promotion, quotes get silently cheaper and silently wrong — which
+      # is what happened the first time this was indexed. Runs offline against the dataset.
+      - name: The promotion index never excludes an eligible promotion
+        run: npm run check:index
+
       - name: Typecheck
         run: npm run typecheck
 

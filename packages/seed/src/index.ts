@@ -30,7 +30,7 @@ export const EPOCH_MS = 1_767_225_600_000;
  * Accompanies the committed dataset. Verified before every run; recorded with every
  * published result — SPEC.md DATA-003, DATA-005.
  */
-export const GENERATOR_VERSION = '0.3.1' as const;
+export const GENERATOR_VERSION = '0.4.0' as const;
 
 export interface DatasetManifest {
 	specVersion: string;

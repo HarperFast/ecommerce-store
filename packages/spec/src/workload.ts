@@ -73,3 +73,15 @@ export function weightedPick<T>(table: readonly (readonly [T, number])[], u: num
 	}
 	return table[table.length - 1][0];
 }
+
+/**
+ * The sentinel meaning "unrestricted on this dimension".
+ *
+ * An empty eligibility array means a promotion applies to every value of that dimension —
+ * and an empty array is exactly what an index cannot match. Storing the sentinel alongside
+ * the real values turns "unrestricted" into an indexable value, so a single `in` probe
+ * covers both cases. Part of the spec rather than the implementation because any stack
+ * hitting this needs the same trick (a Postgres implementation indexes the same sentinel,
+ * or uses a partial index; either way the data has to carry it).
+ */
+export const UNRESTRICTED = '*' as const;

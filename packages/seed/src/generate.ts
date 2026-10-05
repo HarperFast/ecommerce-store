@@ -8,6 +8,7 @@
  * Determinism rules (docs/seed-design.md): one seeded PRNG consumed in a fixed order, ids
  * derived rather than drawn, no wall clock, integer minor units only.
  */
+import { UNRESTRICTED } from '@ecommerce-store/spec';
 import { Rng } from './prng.ts';
 import {
 	ADJECTIVES, BRANDS, CART_SIZE, CATEGORIES, JURISDICTIONS, LOCATIONS_PER_SKU,
@@ -164,18 +165,34 @@ export function* promotions(scale: Scale, rng: Rng): Generator<Record<string, un
 		// BOGOs, so two of the four pricing phases were dead in the workload. A phase that
 		// never fires is a phase the benchmark does not measure, which is the same defect as
 		// exclusives firing on everything — just in the other direction.
+		// Storewide promotions are RARE.
+		//
+		// Nearly half this corpus used to be unrestricted on tier and on category, which is not
+		// a shape any real store has — a handful of offers run storewide, the rest target a
+		// category, a tier, or a SKU. It also made the eligibility index nearly useless: an
+		// unrestricted promotion matches every probe, so a probe returned 31% of the table.
 		const narrow = kind === 'exclusive';
-		const byCategory = narrow || rng.chance(0.55);
+		const byCategory = narrow || !rng.chance(0.08);
 		const row: Record<string, unknown> = {
 			id: `promo-${pad(i, 4)}`,
 			kind,
-			tiers: narrow ? [] : rng.chance(0.5) ? [rng.pick(TIERS)] : [],
+			tiers: narrow ? [] : rng.chance(0.78) ? [rng.pick(TIERS)] : [],
 			skus: [],
 			categoryIds: byCategory ? [rng.pick(CATEGORIES)] : [],
 			thresholdMinor: kind === 'threshold' ? rng.int(5_000, 40_000) : 0,
 			amountMinor: 0,
 			amountBasisPoints: 0,
 		};
+		// Indexable eligibility keys.
+		//
+		// `tiers: []` means "no restriction on tier", which no index can match — a probe for
+		// `tiers = 'gold'` can never return it. That is why the first indexed implementation
+		// silently lost 14% of the corpus and had to be replaced by a full scan. The sentinel
+		// makes "unrestricted" an indexable value like any other, so one `in` probe covers
+		// both "matches this tier" and "applies to every tier".
+		row.tierKeys = (row.tiers as string[]).length ? row.tiers : [UNRESTRICTED];
+		row.categoryKeys = (row.categoryIds as string[]).length ? row.categoryIds : [UNRESTRICTED];
+
 		if (kind === 'bogo') {
 			row.amountBasisPoints = 10000; // the free unit
 		} else if (rng.chance(0.75)) {

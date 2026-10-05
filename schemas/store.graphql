@@ -62,10 +62,16 @@ type Location @table @export @sealed {
 type Promotion @table @export @sealed {
 	id: ID @primaryKey
 	kind: String @indexed
-	# Empty array means "no restriction on this dimension".
-	tiers: [String] @indexed
-	skus: [String] @indexed
-	categoryIds: [String] @indexed
+	# Empty array means "no restriction on this dimension". Kept as the authoritative
+	# eligibility data; `isEligible` reads these.
+	tiers: [String]
+	skus: [String]
+	categoryIds: [String]
+	# The indexable form: the same values, or ['*'] when unrestricted. An index cannot match
+	# an empty array, so without the sentinel a probe can never return a promotion that
+	# applies to everything — which is how the first indexed lookup lost 14% of the corpus.
+	tierKeys: [String] @indexed
+	categoryKeys: [String] @indexed
 	thresholdMinor: Int
 	amountMinor: Int
 	amountBasisPoints: Int

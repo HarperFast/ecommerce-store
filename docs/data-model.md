@@ -22,6 +22,21 @@ So: resolve on read. The one genuinely maintained aggregate, `reviewRollup`, is 
 
 **This reverses cleanly if listing pages return.** The earlier reasoning is preserved in [`future-work.md`](future-work.md), including the three candidate facet-counting mechanisms. Reintroducing faceting reintroduces the pressure to materialize, and the decision should be re-made then rather than inherited from either draft.
 
+## Promotion eligibility, and why it is indexed with a sentinel
+
+An empty eligibility array means "no restriction on this dimension" — and an empty array is exactly what an index cannot match. That single fact broke this twice:
+
+1. **Indexed, incomplete.** Probing `tiers = <tier>` and `categoryIds = <category>` could never return a promotion unrestricted on *both*. 14% of the corpus was unreachable, and it was precisely the globally-applicable 14%.
+2. **Correct, unscalable.** Replacing it with a full sorted scan was right, and ran over all 5,000 `bench` promotions on every quote.
+
+The rows now carry `tierKeys` and `categoryKeys`: the same values, or `['*']` when unrestricted. "Applies to everything" becomes an indexable value like any other, so one `in` probe per dimension covers both cases and the two conditions AND to a **superset** of the eligible set. `isEligible` then applies the authoritative arrays.
+
+Superset, never subset, is the property that matters — a narrowing that can exclude an eligible promotion makes quotes silently cheaper and silently wrong. `scripts/verify-promotion-index.mjs` checks it against every tier × category combination offline, and runs in CI.
+
+`skus` is deliberately not an index dimension: a SKU-restricted promotion is still reachable through its other two, so indexing it would add a third probe for no additional reach.
+
+**Corpus note.** Selectivity is a property of the data as much as the index. Nearly half the promotions used to be unrestricted on tier and on category, which no real store looks like — a handful of offers run storewide, the rest target a category, a tier or a SKU. With that corrected, a probe returns 7.2% of the table instead of 31%.
+
 ## Entities
 
 ```graphql
@@ -101,4 +116,4 @@ type Rate @table @export {
 ## Open
 
 - **The promotion evaluation order in SPEC.md §4 is invented**, not derived from a real pricing engine. It is normative because the alternative is two correct implementations disagreeing on a total — but it should be sanity-checked against someone who has built one.
-- **`Promotion` eligibility is three indexed array fields.** Whether resolving candidates by tier, then SKU, then category is best served by three index probes or one denormalized eligibility key is a P1 measurement, not a P0 guess.
+- **How selective the promotion index can get.** It narrows to 7.2% of the table on `dev`. Tier is the floor: four values means a tier probe can never return less than roughly a quarter plus the storewide share. A composite `(tierKey, categoryKey)` index, or folding tier into the category key, would go further — worth measuring at `bench` scale before building.

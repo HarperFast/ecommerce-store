@@ -9,6 +9,7 @@
  * each wave needs the previous wave's result before it can issue its reads.
  */
 import { Resource } from 'harper';
+import { UNRESTRICTED } from '@ecommerce-store/spec';
 import { evaluatePromotions, isEligible, resolveShipping, resolveTax, resolveUnitPrice } from './lib/pricing.js';
 
 const { Cart, Customer, Product, Variant, Inventory, Location, Promotion, Rate } = tables;
@@ -111,7 +112,8 @@ export class quote extends Resource {
 		}));
 		const subtotal = lines.reduce((sum, l) => sum + l.unitPrice * l.quantity, 0);
 
-		const candidateRows = await collectPromotions();
+		const categoryIds = [...new Set(lines.flatMap((l) => l.categoryIds))];
+		const candidateRows = await collectPromotions(customer.tier, categoryIds);
 		const candidates = [];
 		for (const line of lines) {
 			for (const promotion of candidateRows) {
@@ -152,22 +154,39 @@ export class quote extends Resource {
 }
 
 /**
- * Candidate promotions.
+ * Candidate promotions, by indexed probe.
  *
- * CORRECTNESS FIRST, deliberately. This was two indexed probes — one on `tiers`, one per
- * category — which could never return a promotion that is unrestricted on BOTH dimensions,
- * even though an empty array means "no restriction" and such a promotion is eligible for
- * every line (SPEC.md §4). 14% of the committed promotion corpus was unreachable, and it was
- * exactly the globally-applicable 14%. The probes also inserted rows into a Map in I/O
- * completion order, so `candidateRows` ordering varied between identical requests.
+ * This has been wrong twice, in opposite directions, and both failures are instructive.
  *
- * An index that can express "matches X or is unrestricted" is the obvious optimization and
- * is tracked in docs/data-model.md. It must preserve completeness, including unrestricted
- * rows, and must return a deterministic order. Until it exists, this scans and sorts: a
- * complete slow answer beats a fast wrong one in a reference implementation.
+ * First it probed `tiers = <tier>` and `categoryIds = <category>`. An empty eligibility
+ * array means "no restriction on this dimension", and an index cannot match an empty array —
+ * so a promotion unrestricted on BOTH was unreachable. 14% of the corpus was dead, and it
+ * was exactly the globally-applicable 14%.
+ *
+ * Then it scanned the whole table, which is correct and does not scale: `bench` carries 5,000
+ * promotions and that scan ran on every quote.
+ *
+ * Now the rows carry `tierKeys` / `categoryKeys` — the same values, or `['*']` when
+ * unrestricted — so "applies to everything" is an indexable value like any other. One `in`
+ * probe per dimension covers both cases, and the two conditions AND to a superset of the
+ * eligible set. `isEligible` still applies the authoritative arrays, including `skus`, which
+ * is not indexed because a SKU-restricted promotion is still reachable through its other two
+ * dimensions.
+ *
+ * The result is a SUPERSET, never a subset — that is the property that matters, and
+ * `scripts/verify-promotion-index.mjs` checks it against a full scan.
  */
-async function collectPromotions() {
+async function collectPromotions(tier, categoryIds) {
 	const rows = [];
-	for await (const row of Promotion.search({})) rows.push(row);
+	for await (const row of Promotion.search({
+		conditions: [
+			{ attribute: 'tierKeys', comparator: 'in', value: [tier, UNRESTRICTED] },
+			{ attribute: 'categoryKeys', comparator: 'in', value: [...categoryIds, UNRESTRICTED] },
+		],
+	})) {
+		rows.push(row);
+	}
+	// Sorted: the scan order of two ANDed index probes is not guaranteed, and evaluation
+	// order feeds the normative promotion order (QUOTE-008).
 	return rows.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 }

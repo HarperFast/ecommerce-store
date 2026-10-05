@@ -17,10 +17,11 @@
     "seed": "node packages/seed/src/cli.ts",
     "typecheck": "tsc --build",
     "test:e2e": "npm test --prefix e2e",
-    "check": "npm run check:spec && npm run check:coverage && npm run typecheck && npm run check:deploy",
+    "check": "npm run check:spec && npm run check:coverage && npm run check:index && npm run typecheck && npm run check:deploy",
     "check:spec": "node scripts/check-spec-sync.mjs",
     "check:coverage": "npm run coverage --prefix e2e",
-    "check:deploy": "./scripts/verify-deploy.sh"
+    "check:deploy": "./scripts/verify-deploy.sh",
+    "check:index": "node scripts/verify-promotion-index.mjs --scale dev"
   },
   "dependencies": {
     "@ecommerce-store/spec": "*"

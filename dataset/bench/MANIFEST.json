@@ -1,6 +1,6 @@
 {
   "specVersion": "0.2.0-draft",
-  "generatorVersion": "0.3.1",
+  "generatorVersion": "0.4.0",
   "scale": "bench",
   "seed": "harper-ecommerce-store-v1",
   "compressed": true,
@@ -26,7 +26,7 @@
       "rows": 31281273
     },
     "promotion": {
-      "sha256": "931651a6b1875af27bfae4a5f7e5dbd33f58d362585ab483bee85d26e9e690c4",
+      "sha256": "9c55b4d48ac14f9f74c8ff3e5b0aa0b7ee4e6779050879c526257cdbeed2cadd",
       "rows": 5000
     },
     "rate": {
@@ -40,7 +40,7 @@
   },
   "distributions": {
     "variantsPerProduct": "long-tailed, 1-20",
-    "cartSize": "long-tailed, 1-25",
+    "cartSize": "long-tailed, 1-25 distinct SKUs; collisions redrawn, not dropped",
     "locationsPerSku": "1-6 of 8",
     "tier": "standard 60 / silver 25 / gold 12 / platinum 3",
     "outOfStockRate": 0.12,
