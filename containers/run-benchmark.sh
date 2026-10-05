@@ -69,25 +69,43 @@ done
 say "target health: ${status:-unknown}"
 
 # --- 1. seed (not measured) --------------------------------------------------------------
-if [ "$SCALE" != "dev" ]; then
-  say "expanding $SCALE dataset"
-  (cd .. && node scripts/prepare-dataset.mjs --scale "$SCALE")
+#
+# SKIP_LOAD reuses an existing snapshot instead of reloading. Loading 40M rows takes ~19
+# minutes and is explicitly not measured, so re-paying it to re-run a ladder buys nothing.
+# The RESTORE is not optional even then: a previous run's background writes mutated the
+# data, and a trial must start from the state the snapshot captured.
+if [ "${SKIP_LOAD:-0}" = "1" ]; then
+  if [ ! -f ".snapshots/${SCALE}.tar.gz" ]; then
+    echo "SKIP_LOAD=1 but .snapshots/${SCALE}.tar.gz does not exist" >&2
+    exit 1
+  fi
+  say "SKIP_LOAD — restoring $SCALE from the existing snapshot"
+  $COMPOSE stop harper >/dev/null
+  $COMPOSE run --rm --no-deps -v "$PWD/.snapshots:/snap" harper \
+    bash -c "rm -rf /data/* && tar -C /data -xzf /snap/${SCALE}.tar.gz" >/dev/null
+  $COMPOSE up -d harper
+  sleep 15
+else
+  if [ "$SCALE" != "dev" ]; then
+    say "expanding $SCALE dataset"
+    (cd .. && node scripts/prepare-dataset.mjs --scale "$SCALE")
+  fi
+
+  say "loading dataset ($SCALE) — not measured"
+  (cd .. && node scripts/load-dataset.mjs --scale "$SCALE" --url http://localhost:9925)
+
+  # --- snapshot, so trials start from identical state ---------------------------------------
+  say "snapshotting loaded state for trial restore"
+  $COMPOSE stop harper >/dev/null
+  # NO `-v harper-data:/data` here: that names an UNSCOPED docker volume, while the service
+  # uses the compose-project-scoped `harper-ecommerce-bench_harper-data`. The explicit mount
+  # replaced the service's own, so the snapshot archived an empty volume and the restore
+  # restored it — leaving the target's mutated state to survive between trials, which is the
+  # exact thing the snapshot exists to prevent.
+  $COMPOSE run --rm --no-deps -v "$PWD/.snapshots:/snap" harper \
+    bash -c "tar -C /data -czf /snap/${SCALE}.tar.gz ." >/dev/null
+  $COMPOSE up -d harper
 fi
-
-say "loading dataset ($SCALE) — not measured"
-(cd .. && node scripts/load-dataset.mjs --scale "$SCALE" --url http://localhost:9925)
-
-# --- snapshot, so trials start from identical state ---------------------------------------
-say "snapshotting loaded state for trial restore"
-$COMPOSE stop harper >/dev/null
-# NO `-v harper-data:/data` here: that names an UNSCOPED docker volume, while the service
-# uses the compose-project-scoped `harper-ecommerce-bench_harper-data`. The explicit mount
-# replaced the service's own, so the snapshot archived an empty volume and the restore
-# restored it — leaving the target's mutated state to survive between trials, which is the
-# exact thing the snapshot exists to prevent.
-$COMPOSE run --rm --no-deps -v "$PWD/.snapshots:/snap" harper \
-  bash -c "tar -C /data -czf /snap/${SCALE}.tar.gz ." >/dev/null
-$COMPOSE up -d harper
 
 for trial in $(seq 1 "$TRIALS"); do
   if [ "$trial" -gt 1 ]; then
