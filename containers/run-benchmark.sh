@@ -42,7 +42,10 @@ else
 fi
 
 SCALE="${SCALE:-dev}"
-RATES="${RATES:-400,800,1200,1600,2400}"
+# Default ladder brackets the knee at BENCH scale, where the working set does not fit in
+# memory and capacity is an order of magnitude below dev. A 400-2400 ladder spent four of
+# its five steps past collapse, which locates nothing.
+RATES="${RATES:-25,50,75,100,125,150,200}"
 DURATION="${DURATION:-15}"
 TRIALS="${TRIALS:-1}"
 export TARGET_CPUS="${TARGET_CPUS:-2}"

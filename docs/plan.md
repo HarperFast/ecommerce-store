@@ -51,6 +51,32 @@ The benchmarks repo's methodology is binding here. Results are never published f
 | **GitHub repo** — local only. CI has never run. | Maintainers |
 | **OAuth authorization-server question** — drafted at [`questions/oauth-authorization-server-scope.md`](questions/oauth-authorization-server-scope.md), unsent. Not blocking; auth is future work. | `@harperfast/oauth` maintainers |
 
+## First bench-scale observations (2026-10-05) — NOT results
+
+A `bench`-scale run reached three ladder steps before the load generator died of heap
+exhaustion. The numbers below are recorded because they are the first evidence the dataset
+is doing its job, and discarded as measurements because the run did not complete, the
+generator was in trouble throughout, and the clock was not pinned.
+
+| offered | achieved | p50 | p90 | p99 | errors | cache hit |
+|---|---|---|---|---|---|---|
+| 100 | 99.9 | 29.2 | 94.1 | 369.8 | 0 | 18.4% |
+| 200 | 199.4 | 274.1 | **29,470** | 31,382 | 10 | 26.9% |
+| 400 | 166.1 | 50.6 | 11,787 | 22,410 | 1,369 | 33.5% |
+
+Cold start to first response: **3,056 ms** — the first cold number the project has recorded.
+
+What it suggests, pending a run that completes:
+
+- **Capacity is somewhere between 100 and 200 rps**, against 2,000+ rps at `dev` scale on the
+  same container. A ~13x drop is what a working set exceeding memory looks like, so
+  `DATA-004` appears to be doing exactly what it was written for.
+- **The ladder was mis-ranged by roughly 10x.** Four of five steps sat past collapse, which
+  locates no inflection point. Default is now 25…200.
+- **Cache hit rate climbs but stays low** (18% → 33%). At `dev` it reached 77% in the first
+  step. Worth watching: it may simply be a cold cache over a far larger key space, or the
+  hot set may be too diffuse at 2M products even with the skew.
+
 ## Open from cross-model review (rounds 1–2)
 
 Two rounds of three-reviewer cross-model review (Claude subagent, agy/Gemini, codex) ran against the foundation. Fixes are in `4c7630b` and `91b5650`. What they surfaced and I did **not** fix:

@@ -83,12 +83,20 @@ const OUT = argOf('out', join(import.meta.dirname, 'results'));
  * Ceiling on concurrent in-flight requests.
  *
  * An open model offers arrivals regardless of completions, so once the target saturates the
- * in-flight set grows without bound and the GENERATOR dies first — which is a harness
- * failure masquerading as a target failure. Past this ceiling arrivals are SHED and counted.
- * A step with shed arrivals is beyond the target's capacity: that is a result, not an error,
- * but the achieved rate for such a step is a floor rather than a measurement.
+ * in-flight set grows without bound and the GENERATOR dies first — a harness failure
+ * masquerading as a target failure. Past this ceiling arrivals are SHED and counted. A step
+ * with shed arrivals is beyond the target's capacity: that is a result, not an error, but
+ * the achieved rate for such a step is a floor rather than a measurement.
+ *
+ * 750, not 4000. At 4000 the generator held four thousand concurrent responses from a
+ * saturated target — product aggregates run to tens of kilobytes at bench scale — and died
+ * of heap exhaustion at ~507 MB, which is Node's default cap inside a 1 GiB container. The
+ * ceiling is also a measurement choice, not just a safety valve: a target serving ~150 rps
+ * with sub-second latency has ~150 requests outstanding at steady state, so a ceiling of
+ * 4000 queues twenty-five seconds of work and measures the generator's queue rather than
+ * the target.
  */
-const MAX_IN_FLIGHT = Number(argOf('max-in-flight', '4000'));
+const MAX_IN_FLIGHT = Number(argOf('max-in-flight', '750'));
 /**
  * Cold start, measured by the orchestrator (it owns the restart) and passed in, so the three
  * numbers the run lifecycle wants — cold, warm, hot — all land in one record. Only reporting
@@ -137,6 +145,8 @@ const quantile = (sorted, q) =>
 async function step({ rate, seconds, nextRequest, nextWrite, writeRate, label }) {
 	const samples = [];
 	const inFlight = new Set();
+	// Per-step, so abandoning a saturated step's tail cannot touch the next one.
+	const abort = new AbortController();
 	const startedAt = performance.now();
 	const cpuBefore = process.cpuUsage();
 
@@ -152,6 +162,7 @@ async function step({ rate, seconds, nextRequest, nextWrite, writeRate, label })
 		const t0 = performance.now();
 		try {
 			const response = await fetch(request.url, {
+				signal: abort.signal,
 				method: request.method,
 				headers: request.method === 'POST' ? { 'content-type': 'application/json' } : undefined,
 				body: request.method === 'POST' ? '{}' : undefined,
@@ -173,6 +184,10 @@ async function step({ rate, seconds, nextRequest, nextWrite, writeRate, label })
 			}
 			samples.push({
 				kind: request.kind,
+				// The cache status is reduced to a flag here rather than retaining the whole
+				// Server-Timing string per sample: at hundreds of thousands of samples the
+				// strings are the largest thing the generator holds, and only the flag is read.
+				cacheHit: serverTiming?.includes('cache;desc=hit') ? 1 : serverTiming?.includes('cache;desc=miss') ? 0 : null,
 				ms: performance.now() - t0,
 				// Service time excludes the wait between an arrival's SCHEDULED time and its
 				// dispatch. Reporting only service time is coordinated omission in a harness
@@ -181,7 +196,6 @@ async function step({ rate, seconds, nextRequest, nextWrite, writeRate, label })
 				arrivalMs: performance.now() - request.scheduledAt,
 				status: response.status,
 				bytes,
-				serverTiming,
 			});
 		} catch (error) {
 			samples.push({ kind: request.kind, ms: performance.now() - t0, arrivalMs: performance.now() - request.scheduledAt, status: 0, error: String(error.message ?? error) });
@@ -259,11 +273,14 @@ async function step({ rate, seconds, nextRequest, nextWrite, writeRate, label })
 	// headroom check.
 	const offerSeconds = (performance.now() - startedAt) / 1000;
 
-	// Drain whatever is still outstanding.
+	// Drain whatever is still outstanding. Requests that never land are abandoned here, and
+	// counted — if they were allowed to run on, they would complete during the NEXT step and
+	// be attributed to a rate they were never offered at.
 	const drainDeadline = performance.now() + 30_000;
 	while (inFlight.size > 0 && performance.now() < drainDeadline) {
 		await Promise.race([...inFlight, new Promise((r) => setTimeout(r, 100))]);
 	}
+	abort.abort();
 
 	const wall = (performance.now() - startedAt) / 1000;
 	const cpu = process.cpuUsage(cpuBefore);
@@ -272,8 +289,8 @@ async function step({ rate, seconds, nextRequest, nextWrite, writeRate, label })
 	const ok = samples.filter((s) => s.status >= 200 && s.status < 300);
 	// Measured, not assumed. WRITE-003 forbids achieving freshness by disabling caching, and
 	// a hit rate of zero is exactly what that looks like in the numbers.
-	const cacheable = ok.filter((s) => s.serverTiming?.includes('cache;desc='));
-	const hits = cacheable.filter((s) => s.serverTiming.includes('cache;desc=hit')).length;
+	const cacheable = ok.filter((s) => s.cacheHit !== null && s.cacheHit !== undefined);
+	const hits = cacheable.filter((s) => s.cacheHit === 1).length;
 	// Reported latency is SCHEDULED-arrival to completion. Service time is kept too, and a
 	// large gap between them means the generator queued, not that the target was slow.
 	const latencies = ok.map((s) => s.arrivalMs ?? s.ms).sort((a, b) => a - b);
