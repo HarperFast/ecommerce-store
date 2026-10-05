@@ -94,34 +94,51 @@ test.describe('cart quote', () => {
 		}
 	});
 
-	test(covers('QUOTE-007')('tax applies to the post-discount subtotal, consistently per jurisdiction'), async ({ request }) => {
-		const ratePerJurisdiction = new Map<string, number>();
-		const offenders: string[] = [];
+	test(covers('QUOTE-007')('tax applies to the post-discount subtotal, at one rate per jurisdiction'), async ({ request }) => {
+		// Half-up to the minor unit, the same rounding the engine uses.
+		const taxFor = (taxable: number, basisPoints: number) => Math.floor((taxable * basisPoints + 5000) / 10000);
+
+		const samples = new Map<string, { taxable: number; tax: number }[]>();
 		let checked = 0;
-		for (let i = 0; i < 120; i++) {
+		for (let i = 0; i < 160; i++) {
 			const response = await request.post(API.quote(`cart-${String(i * 7).padStart(6, '0')}`), { data: {} });
 			if (response.status() === 404) continue;
 			checked++;
 			const body = await response.json();
 			expect(body.taxJurisdiction, 'the quote must name the jurisdiction it taxed in').toBeTruthy();
-			const taxable = body.subtotal - body.discountTotal;
 			expect(Number.isInteger(body.tax) && body.tax >= 0).toBe(true);
-			if (taxable === 0) {
-				if (body.tax !== 0) offenders.push(`${body.cartId}: tax ${body.tax} on a zero taxable amount`);
+			const taxable = body.subtotal - body.discountTotal;
+			if (taxable <= 0) {
+				expect(body.tax, 'no taxable amount, no tax').toBe(0);
 				continue;
 			}
-			// Tax on the PRE-discount subtotal would show up as an inconsistent effective rate
-			// across carts in one jurisdiction, since the discount share varies cart to cart.
-			const effective = Math.round((body.tax / taxable) * 10000);
-			const seen = ratePerJurisdiction.get(body.taxJurisdiction);
-			if (seen === undefined) ratePerJurisdiction.set(body.taxJurisdiction, effective);
-			else if (Math.abs(seen - effective) > 2) {
-				offenders.push(`${body.cartId}: ${body.taxJurisdiction} effective rate ${effective}bp, expected ~${seen}bp`);
+			if (!samples.has(body.taxJurisdiction)) samples.set(body.taxJurisdiction, []);
+			samples.get(body.taxJurisdiction)!.push({ taxable, tax: body.tax });
+		}
+
+		expect(checked).toBeGreaterThan(80);
+		expect(samples.size, 'the sample must span more than one jurisdiction').toBeGreaterThan(1);
+
+		const offenders: string[] = [];
+		for (const [jurisdiction, rows] of samples) {
+			// Infer the rate from the LARGEST taxable amount, where rounding is least
+			// significant — a ratio taken from a small cart is dominated by the half-up step
+			// (us-ny at a taxable of 1074 reads as 884.5bp against a nominal 888bp), so a
+			// tolerance band on the ratio is the wrong instrument entirely.
+			const widest = rows.reduce((a, b) => (b.taxable > a.taxable ? b : a));
+			const basisPoints = Math.round((widest.tax / widest.taxable) * 10000);
+
+			// Then assert EXACT equality everywhere. This is what makes the test sharp: taxing
+			// the PRE-discount subtotal cannot satisfy it, because each cart's discount share
+			// differs, so no single rate reproduces every observed tax.
+			for (const { taxable, tax } of rows) {
+				const expected = taxFor(taxable, basisPoints);
+				if (tax !== expected) {
+					offenders.push(`${jurisdiction}: taxable ${taxable} gave ${tax}, ${basisPoints}bp half-up gives ${expected}`);
+				}
 			}
 		}
-		expect(checked).toBeGreaterThan(60);
-		expect(ratePerJurisdiction.size, 'the sample must span more than one jurisdiction').toBeGreaterThan(1);
-		expect(offenders, 'carts whose tax is not post-discount or not rate-consistent').toEqual([]);
+		expect(offenders, 'carts whose tax is not a single post-discount rate').toEqual([]);
 	});
 
 	test(covers('DATA-002')('every monetary field is an integer in minor units'), async ({ request }) => {
