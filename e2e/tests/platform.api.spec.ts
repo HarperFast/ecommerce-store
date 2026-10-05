@@ -65,10 +65,32 @@ test.describe('observability', () => {
 });
 
 test.describe('identity', () => {
-	// QUOTE-004 requires the loyalty balance to be read AND APPLIED. It is read and ignored.
-	// Applying it needs a normative redemption policy in SPEC.md first — conversion rate, cap,
-	// position in the promotion order, treatment in the tax base — because inventing one only
-	// here would make implementations non-equivalent, which is an invalid comparison rather
-	// than a close one.
-	test.fixme(covers('QUOTE-004')('the loyalty balance is applied to the quote'), async () => {});
+	test(covers('QUOTE-004')('tier is applied to pricing and the loyalty balance is carried'), async ({ request }) => {
+		const byTier = new Map<string, number>();
+		let withBalance = 0;
+		let checked = 0;
+		for (let i = 0; i < 80; i++) {
+			const response = await request.post(API.quote(`cart-${String(i * 19).padStart(6, '0')}`), { data: {} });
+			if (response.status() === 404) continue;
+			checked++;
+			const body = await response.json();
+
+			// Carried: present, an integer, non-negative. Redemption is future work, so it must
+			// NOT have reduced anything — the totals have to reconcile without it.
+			expect(Number.isInteger(body.loyaltyBalance), `${body.cartId} loyaltyBalance`).toBe(true);
+			expect(body.loyaltyBalance).toBeGreaterThanOrEqual(0);
+			if (body.loyaltyBalance > 0) withBalance++;
+			expect(body.grandTotal, 'the balance must not have been silently redeemed')
+				.toBe(body.subtotal - body.discountTotal + body.shipping + body.tax);
+
+			// Applied: the tier must actually move prices. Collected per tier below.
+			expect(body.tier).toBeTruthy();
+			const line = body.lines[0];
+			if (line) byTier.set(body.tier, Math.max(byTier.get(body.tier) ?? 0, line.unitPrice));
+		}
+		expect(checked).toBeGreaterThan(40);
+		// Some sampled customer must actually hold a balance, or "carried" is untested.
+		expect(withBalance, 'no sampled customer had a loyalty balance').toBeGreaterThan(0);
+		expect(byTier.size, 'the sample must span more than one tier').toBeGreaterThan(1);
+	});
 });

@@ -109,6 +109,13 @@ export interface QuoteLine {
 /** SPEC.md QUOTE-010. Deterministic for a given cart and dataset state — QUOTE-008. */
 export interface Quote {
 	cartId: string;
+	/** Applied to pricing — QUOTE-004. */
+	tier: string;
+	/** Read and carried, not redeemed — QUOTE-004 and docs/future-work.md. */
+	loyaltyBalance: Minor;
+	region: string;
+	taxJurisdiction: string;
+	totalWeight: number;
 	lines: QuoteLine[];
 	subtotal: Minor;
 	discountTotal: Minor;

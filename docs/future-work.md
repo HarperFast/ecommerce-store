@@ -76,6 +76,14 @@ The parked question for the `@harperfast/oauth` maintainers is preserved verbati
 
 Unblocked and unanswered. Nothing at P0 depends on it.
 
+## Loyalty redemption
+
+`QUOTE-004` originally required the loyalty balance to be read **and applied**. It now requires it read and carried, and redemption moved here.
+
+The reasoning is worth keeping, because it is a general test for whether a requirement earns its place: redeeming a balance in a quote is arithmetic on a field already fetched in wave 2 — no extra read, no extra wave, no cache pressure. It would have imposed a normative rule on every competing implementation (conversion rate, cap, position in the promotion order, treatment of the tax base) in exchange for distinguishing no architecture. A requirement that costs every implementer and separates no stack is measurement noise.
+
+Redemption becomes genuinely interesting at **checkout**, where it decrements a balance under concurrency — a contended per-customer write, which is exactly the kind of thing the comparison exists to expose. 39% of seeded customers carry a balance, median 26,038 minor units against cart subtotals of roughly 20,000–120,000, so a policy will need a cap when it arrives.
+
 ## Checkout commit, personalization, realtime
 
 - **Checkout commit** (`CART-001`–`CART-004`): cart mutation, a stubbed payment authorizer with fixed simulated latency identical across implementations, stock decrement, and clean failure on insufficient stock with no partial order. Note the cart *quote* is in P0; only the commit is deferred. A real payment provider was rejected outright — it injects identical third-party latency into every implementation and measures nothing.

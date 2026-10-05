@@ -163,6 +163,9 @@ export class quote extends Resource {
 			// SOME number came back. A quote nobody can check is the shape of defect this
 			// specification exists to prevent.
 			tier: customer.tier,
+			// Carried, not redeemed — QUOTE-004. Redemption lands with checkout, where it is a
+			// contended per-customer write rather than arithmetic on a row already in hand.
+			loyaltyBalance: customer.loyaltyBalance ?? 0,
 			region: customer.region,
 			taxJurisdiction: customer.taxJurisdiction,
 			totalWeight,

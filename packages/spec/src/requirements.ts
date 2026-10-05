@@ -39,7 +39,7 @@ export const REQUIREMENTS: readonly Requirement[] = [
 	r('QUOTE-001', 'QUOTE', 'MUST', 'Every response is unique to its cart; response-level caching is a conformance failure'),
 	r('QUOTE-002', 'QUOTE', 'MUST', 'Each line resolves product and variant; an unknown sku fails the quote with 400'),
 	r('QUOTE-003', 'QUOTE', 'MUST', 'Availability resolves against inventory across locations, honouring priority'),
-	r('QUOTE-004', 'QUOTE', 'MUST', 'Customer tier and loyalty balance are read and applied'),
+	r('QUOTE-004', 'QUOTE', 'MUST', 'Customer tier is applied to pricing; loyalty balance is read and carried in the response'),
 	r('QUOTE-005', 'QUOTE', 'MUST', 'Promotions resolve by tier, SKU and category and evaluate stacking, exclusivity, threshold and BOGO'),
 	r('QUOTE-006', 'QUOTE', 'MUST', 'Shipping resolves by region and total cart weight'),
 	r('QUOTE-007', 'QUOTE', 'MUST', 'Tax resolves by jurisdiction and applies to the post-discount subtotal'),

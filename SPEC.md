@@ -95,7 +95,9 @@ The write-shaped read path, and the primary endpoint under test. Prices a cart.
 - `QUOTE-001` **MUST** — Every response is unique to its cart. No implementation may serve a stored response for the endpoint. Entity caches are expected and do their normal job; **response-level caching is a conformance failure**, not an optimisation.
 - `QUOTE-002` **MUST** — Each line resolves its product and variant. A line naming an unknown sku fails the quote with `400`; it is not silently dropped.
 - `QUOTE-003` **MUST** — Availability per line is resolved against inventory across fulfillment locations, honouring location priority.
-- `QUOTE-004` **MUST** — The customer's tier and loyalty balance are read and applied.
+- `QUOTE-004` **MUST** — The customer's tier is **applied** to pricing, and their loyalty balance is **read and carried** in the response.
+
+  Carried, not applied, deliberately. Redeeming a balance is arithmetic on a field the quote already fetches in wave 2: no extra read, no extra wave, no cache pressure. It would impose a normative redemption rule — conversion, cap, position in the promotion order, treatment of the tax base — that every implementation must reproduce exactly, in exchange for distinguishing no architecture. Redemption becomes interesting at **checkout**, where it decrements a balance under concurrency: a contended per-customer write. It is recorded as future work there rather than as busywork here.
 - `QUOTE-005` **MUST** — Promotions are resolved by tier, SKU, and category — **including promotions unrestricted on any of those dimensions** — and evaluated in application code: **stacking, exclusivity, threshold, and BOGO** rules. Evaluation order is specified (below) so every implementation produces identical totals.
 - `QUOTE-006` **MUST** — Shipping is resolved by region and total cart weight.
 - `QUOTE-007` **MUST** — Tax is resolved by the customer's jurisdiction and applied to the post-discount subtotal.
