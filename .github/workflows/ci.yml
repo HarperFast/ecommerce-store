@@ -84,7 +84,10 @@ jobs:
         run: |
           version=$(node -p "require('./package.json').devDependencies.harper")
           npm install -g --no-audit --no-fund "harper@${version}"
-          installed=$(node -p "require('/usr/local/lib/node_modules/harper/package.json').version")
+          # Ask npm where it put it. A hardcoded /usr/local/lib/node_modules is wrong on any
+          # runner that sets its own prefix, and the failure reads as "harper is missing"
+          # rather than "we looked in the wrong place".
+          installed=$(node -p "require('$(npm root -g)/harper/package.json').version")
           [ "$installed" = "$version" ] || { echo "harper version drift: $installed != $version"; exit 1; }
           echo "harper $installed"
 
