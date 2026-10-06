@@ -38,7 +38,9 @@ The benchmarks repo's methodology is binding here. Results are never published f
 ## Next
 
 1. **A `bench`-scale run that completes.** No run has yet finished the full ladder at `bench` scale, so the observations below are partial and nothing downstream of them is settled.
-2. **A ground-truth correctness guard in the harness.** The measurement rules require it and the harness does not have it. This is the largest outstanding hole in the measurement story — see `bench/README.md`.
+2. **A correctness suite with expected values.** The measurement rules require a ground-truth guard and the harness does not have one — see `bench/README.md`. The shape: a suite separate from conformance, keyed to the loaded dataset's manifest checksum, asserting *values* rather than properties. Conformance asserts a quote is well-formed and self-consistent; two implementations can both pass it and disagree on every total, which is what this closes.
+
+   The expected values are **data, not a shared function**. A calculator in this repo emits them; no other implementation imports anything. A stack that computes pricing inside one SQL query compares against the same table as Harper does — the answer is stack-neutral, the procedure deliberately is not.
 3. **Confirm `FRESH_MS`.** SPEC.md §6 now sets it provisionally; the figure wants a real run behind it, and `PDP-003` / `WRITE-002` depend on it.
 4. **An in-application background writer.** The harness drives writes through the operations API. That is fine for coherence pressure but is not the same as the application doing it.
 
@@ -94,6 +96,7 @@ Known gaps, each with why it is still open rather than closed.
 
 ## Open decisions
 
+- **Where the tier multipliers live.** They are now normative in `SPEC.md` §4 (*Resolved unit price*), which closes the ambiguity. The alternative is `rate` rows discriminated by `kind: 'tier'`: the figures would then be dataset-pinned and checksummed, derivable by any implementation from data it already loads, and the duplicated constant in `resources/lib/pricing.js` and `packages/seed/src/vocabulary.ts` — which nothing currently checks for drift — would go away. Costs one dataset regeneration, which the pricing phase balance decision below likely spends anyway.
 - **Facet counting**, when listing pages return. Three candidates identified, none chosen; see [`future-work.md`](future-work.md).
 - **Promotion eligibility lookup** — indexed array probes versus one denormalized key. A P1 measurement, not a guess. See [`data-model.md`](data-model.md).
 - **Dataset distribution via Git LFS or release assets.** LFS today: the org is on Enterprise with ample headroom and near-zero usage, so the current dataset is comfortable. Release assets are unmetered and deletable, which matters if regeneration becomes routine. Revisit if the dataset grows substantially, regeneration becomes frequent, or clone volume climbs.

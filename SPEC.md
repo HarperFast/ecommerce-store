@@ -71,6 +71,19 @@ Reaching eight tables required three judgment calls. Each is recorded because ea
 - `CACHE-002` **MUST** — Every cached value is bounded by `FRESH_MS` (§6) — by explicit invalidation on write, by expiry, or both. An implementation states which mechanism it relies on.
 - `CACHE-003` **MUST** — A cache key includes every dimension the cached value varies by. Serving a value keyed on fewer dimensions than it varies by is a correctness failure, not a cache tuning choice.
 
+### Rate table invariants
+
+The `rate` table is looked up, never searched, so its contents carry a contract. These hold
+in the dataset and an implementation may rely on them rather than defending against them:
+
+- **Shipping bands within a region are contiguous, non-overlapping, and inclusive at both
+  ends.** `weightMin` and `weightMax` are both inclusive, and the bands of a region cover
+  every non-negative weight — the topmost band is open-ended in effect. There is therefore
+  exactly one matching band for any cart, and **no fallback behaviour is specified because
+  no cart can reach one.** An implementation that finds zero or several matching bands has
+  loaded a dataset that violates this contract and should fail loudly rather than guess.
+- **Exactly one tax rate per jurisdiction.**
+
 ### Invariants
 
 - `DATA-002` **MUST** — Money is integer minor units (cents) end to end. No implementation may introduce a binary floating-point representation of money.
@@ -94,16 +107,37 @@ The write-shaped read path, and the primary endpoint under test. Prices a cart.
 
 - `QUOTE-001` **MUST** — Every response is unique to its cart. No implementation may serve a stored response for the endpoint. Entity caches are expected and do their normal job; **response-level caching is a conformance failure**, not an optimisation.
 - `QUOTE-002` **MUST** — Each line resolves its product and variant. A line naming an unknown sku fails the quote with `400`; it is not silently dropped.
-- `QUOTE-003` **MUST** — Availability per line is resolved against inventory across fulfillment locations, honouring location priority.
-- `QUOTE-004` **MUST** — The customer's tier is **applied** to pricing, and their loyalty balance is **read and carried** in the response.
+- `QUOTE-003` **MUST** — Availability per line is resolved against inventory across fulfillment locations in ascending `location.priority`, drawing from each in turn until the line's quantity is satisfied or the region's locations are exhausted.
+
+  **A shortfall does not change what is priced.** The line is priced at its full requested quantity and the unmet amount is reported as `shortfall`. Pricing only the available quantity would make a cart's total a function of live inventory, which the background writer (§6) is continuously changing — totals would drift under load for reasons unrelated to the architecture, and `QUOTE-008` determinism would hold only between writes. A quote prices what was asked for and states what cannot be filled.
+- `QUOTE-004` **MUST** — The customer's tier is **applied** to pricing, by the normative table in *Resolved unit price* below, and their loyalty balance is **read and carried** in the response.
 
   Carried, not applied, deliberately. Redeeming a balance is arithmetic on a field the quote already fetches in wave 2: no extra read, no extra wave, no cache pressure. It would impose a normative redemption rule — conversion, cap, position in the promotion order, treatment of the tax base — that every implementation must reproduce exactly, in exchange for distinguishing no architecture. Redemption becomes interesting at **checkout**, where it decrements a balance under concurrency: a contended per-customer write. It is recorded as future work there rather than as busywork here.
 - `QUOTE-005` **MUST** — Promotions are resolved by tier, SKU, and category — **including promotions unrestricted on any of those dimensions** — and evaluated in application code: **stacking, exclusivity, threshold, and BOGO** rules. Evaluation order is specified (below) so every implementation produces identical totals.
-- `QUOTE-006` **MUST** — Shipping is resolved by region and total cart weight.
+- `QUOTE-006` **MUST** — Shipping is resolved by the customer's region and the cart's total weight, where total weight is `Σ (variant.weight × quantity)` over the merged lines, against the band contract in §3. Shipping is **not** discounted and **not** taxed.
 - `QUOTE-007` **MUST** — Tax is resolved by the customer's jurisdiction and applied to the post-discount subtotal.
 - `QUOTE-008` **MUST** — The quote is **deterministic**: the same cart against the same dataset state produces a byte-identical response. This is what makes the endpoint verifiable at all, and it is the ground-truth correctness guard the measurement rules require.
 - `QUOTE-009` **MUST** — An unknown cart id returns `404`.
-- `QUOTE-010` **MUST** — The response itemizes per line: resolved unit price, quantity, applied promotions, and line total; and at cart level: subtotal, discount total, shipping, tax, and grand total.
+- `QUOTE-010` **MUST** — The response itemizes per line: resolved unit price, quantity, applied promotions, line total, and `shortfall` (zero when the line is fully available); and at cart level: subtotal, discount total, shipping, tax, and grand total. `grandTotal` equals `subtotal - discountTotal + shipping + tax`.
+
+### Resolved unit price
+
+Before any promotion is considered, each line's unit price is `variant.basePrice` adjusted
+for the customer's tier. The adjustment is **normative** — without it two implementations
+disagree on every line of every quote, before pricing logic has run at all.
+
+| Tier | Basis points | Effect |
+|---|---|---|
+| `standard` | 10000 | base price unchanged |
+| `silver` | 9500 | 5% off |
+| `gold` | 9000 | 10% off |
+| `platinum` | 8500 | 15% off |
+
+`resolvedUnitPrice = round_half_up(basePrice × tierBasisPoints / 10000)`, in integer minor
+units. A tier absent from this table resolves as `standard`.
+
+The same resolved unit price is what §5 returns for a product aggregate, so a given variant
+at a given tier prices identically on both endpoints.
 
 ### Promotion evaluation order
 
@@ -111,22 +145,27 @@ Normative, because promotion stacking is order-dependent and an unspecified orde
 
 > **Each cart-wide promotion (`exclusive`, `threshold`) and each `bogo` promotion applies at most once per cart. Each `stackable` promotion applies at most once per eligible line.** This is the rule that decides most of the rest. Left implicit, a single cart-wide promotion eligible for several lines applies once per line and compounds — a large enough one prices the cart to zero and returns a well-formed, deterministic, entirely wrong 200.
 
-> **All discounts draw on one budget: the line's remaining amount.** Cart-wide discounts are allocated across the lines they are eligible for, in proportion to what each still has left, by largest remainder with ties on ascending SKU. Separate cart-wide and per-line accumulators let both discount the same money, which the 60% cap then concealed.
+> **All discounts draw on one budget: the line's remaining amount.** Cart-wide discounts are allocated across the lines they are eligible for, in proportion to what each still has left, by largest remainder with ties on ascending SKU. Holding a separate cart-level accumulator alongside the per-line ones lets both discount the same money; the cap bounds the result either way, so the double-spend is invisible in the total and shows up only as per-line figures that do not sum to it.
 
-> **Cart lines are merged by SKU before evaluation.** Nothing requires a cart's lines to be distinct, and per-SKU state with repeated SKUs produced a negative discount — a quote charging above its own subtotal — for a cart with no promotions.
+> **Cart lines are merged by SKU before evaluation.** Nothing requires a cart's lines to be distinct, and evaluation state is keyed by SKU. Two entries of one SKU are one line of a larger quantity — which is what a shopper expects, and what keeps per-SKU state consistent with a subtotal summed per line.
 
-Promotions are either **cart-wide** (`exclusive`, `threshold`) or **per-line** (`bogo`, `stackable`). The two draw on separate budgets: cart-wide discounts accumulate against the subtotal, per-line discounts draw down that line's remaining amount. Neither may take a line or the cart below zero.
+Promotions are either **cart-wide** (`exclusive`, `threshold`) or **per-line** (`bogo`, `stackable`). Both kinds draw down the same per-line remaining amounts, by the allocation rule above. No discount may take a line, or the cart, below zero.
 
 1. Candidate promotions are collected by tier, SKU, and category. **A promotion unrestricted on a dimension (an empty array) is eligible on that dimension**, so a promotion unrestricted on every dimension is eligible for every line — collection must return it.
 2. **Exclusive** — cart-wide, evaluated against the subtotal. The highest-value one wins; if one applies, **no other promotion applies at all**. Attributed to every line it was eligible for.
 3. Otherwise **threshold** — cart-wide, each eligible promotion applied **once**, against the **pre-discount** subtotal, if the subtotal meets its threshold. Attributed to every line it was eligible for.
 4. Then **BOGO** — each eligible promotion applied **once**, to the single lowest-priced qualifying unit among the lines it is eligible for, where a qualifying line has quantity ≥ 2 and a non-zero remaining amount. Ties break on ascending SKU, so the result does not depend on cart line order.
-5. Then **stackable** — each eligible promotion applied **once per eligible line**, against that line's **remaining** amount, so successive percentage discounts compound rather than all computing against the gross line total.
-6. Ties at any step break on ascending promotion id.
-7. **At most three stackable promotions apply to any one line**, in ascending promotion id.
-8. **`discountTotal` never exceeds 60% of the subtotal.** The cap is applied last, so it bounds every path including a single large exclusive.
 
-Steps 7 and 8 are normative bounds, not tuning: real stores limit stacking, and without a bound a promotion corpus with enough unrestricted stackables compounds a cart to zero.
+   **The discount is the promotion's own amount applied to that one unit**, not to the line — `amountBasisPoints` of the unit price, or `amountMinor`, by the same rule as every other kind. A `bogo` promotion at 10000 basis points makes that unit free, which is what the name describes and what the dataset's `bogo` rows carry; the magnitude is read from the promotion rather than assumed so that a corpus carrying anything else prices correctly.
+5. Then **stackable** — each eligible promotion applied **once per eligible line**, against that line's **remaining** amount, so successive percentage discounts compound rather than all computing against the gross line total.
+6. **A promotion carrying a non-zero `thresholdMinor` requires that minimum pre-discount subtotal, whatever its kind.** It is not exclusive to the `threshold` kind: a flat `amountMinor` on a stackable needs a floor, or it discounts more than the cart it lands on.
+7. Ties at any step break on ascending promotion id.
+8. **At most three stackable promotions apply to any one line**, in ascending promotion id.
+9. **`discountTotal` never exceeds 60% of the subtotal**, floored. The cap is a **running** bound, not a final truncation: each discount is applied against the headroom remaining at the moment it is applied, and one that would cross the cap is applied **partially**, up to that headroom. A promotion reduced to nothing by an exhausted cap is not attributed to any line.
+
+   Truncating at the end instead would leave `appliedPromotionIds` citing promotions whose discount was scaled away afterwards, which `QUOTE-012` forbids, and would make per-line totals disagree with the cart total they sum to.
+
+Steps 8 and 9 are normative bounds, not tuning: real stores limit stacking, and without a bound a promotion corpus with enough unrestricted stackables compounds a cart to zero.
 
 Rounding: each discount rounds half-up to the minor unit at the point it is applied, not at the end.
 

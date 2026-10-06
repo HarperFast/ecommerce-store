@@ -106,11 +106,11 @@ function groupByPromotion(candidates) {
  *
  * Ties break on ascending promotion id at every step.
  *
- * Two accumulators, because cart-wide and per-line discounts cannot share one budget without
- * one silently eating the other's headroom:
- *   - `cartDiscount` for exclusive/threshold, capped at the subtotal
- *   - per-line `remaining`, which bogo/stackable draw down, so a line can never be discounted
- *     below zero and a percentage promotion compounds against what is actually left
+ * ONE budget: the per-line `remaining` map, which every phase draws down through `drawDown`.
+ * Cart-wide discounts are allocated across the lines they are eligible for in proportion to
+ * what each still has left. A separate cart-level accumulator alongside these lets both
+ * discount the same money — the cap bounds the total either way, so the double-spend never
+ * shows in `discountTotal`, only in per-line figures that stop summing to it.
  */
 export function evaluatePromotions({ lines: inputLines, candidates, subtotal }) {
 	/**
@@ -222,7 +222,10 @@ export function evaluatePromotions({ lines: inputLines, candidates, subtotal }) 
 			.filter((l) => l && l.quantity >= 2 && (remaining.get(l.sku) ?? 0) > 0)
 			.sort((a, b) => a.unitPrice - b.unitPrice || (a.sku < b.sku ? -1 : 1))[0];
 		if (!line) continue;
-		const touched = drawDown([line.sku], line.unitPrice);
+		// The promotion's own amount, against that ONE unit — not the line (SPEC.md §4 step 4).
+		// The corpus carries 10000 basis points on every bogo row, which makes the unit free;
+		// reading the magnitude rather than assuming it keeps a corpus that says otherwise correct.
+		const touched = drawDown([line.sku], discountFor(entry.promotion, line.unitPrice));
 		if (touched.length) attribute(entry, touched);
 	}
 
