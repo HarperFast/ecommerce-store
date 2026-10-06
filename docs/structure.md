@@ -1,17 +1,17 @@
 # Repository structure — decision record
 
-Status: **decided** (P0). Verified against Harper `5.2.12` on 2026-09-14,
-re-verified 2026-10-01.
+Status: **decided** (P0). Verified against Harper `5.2.12`.
 
 ## The question
 
 This repo is an **Example** under the org repository taxonomy: it must be clonable and
 deployable as-is, and it tracks the latest Harper release. But it also wants shared
-packages — a platform-neutral spec, a seed generator, shared UI, and a portable e2e suite
-that runs against competitor implementations too.
+packages — a platform-neutral spec, a seed generator, and a portable e2e suite that runs
+against competitor implementations too.
 
-Those two pull against each other. `harper-vs-vercel-benchmark` resolved it with a
-`vendor/shared` directory plus an esbuild bundle step. We wanted something less ugly.
+Those two pull against each other. The alternative resolution is a `vendor/` directory plus
+a bundle step, which works and costs a build stage plus a copy of every shared file. Plain
+workspaces avoid both.
 
 ## The constraint (why the app is at the repo root)
 
@@ -46,10 +46,6 @@ Verified empirically against the exact commands Harper runs, not inferred:
 | Install | `npm install --force --omit=dev --no-audit --no-fund` (cwd = component root) | `node_modules/@ecommerce-store/{spec,ui,seed}` → relative symlinks into `packages/`; 26 packages, no dev tooling |
 | Runtime | `import { … } from '@ecommerce-store/spec'` | resolves |
 
-The `e2e/` exclusion below was originally forced by a Next.js optional peer dependency.
-Next.js is gone from P0, but the exclusion stays: it is correct on its own terms, and the
-leak would silently return the moment a framework does.
-
 `--install-links` is added only on win32 for candidate builds; on POSIX (Fabric) npm links
 `file:`/workspace dependencies **relatively**, which survives the staging→live rename.
 
@@ -78,21 +74,21 @@ only) and it is what lets the deployment double as an E2E target for Harper rele
 `package.json` and its own `node_modules`. It consumes the spec via
 `"@ecommerce-store/spec": "file:../packages/spec"`.
 
-That looks like an inconsistency. It is deliberate, and the reason is measured:
+That looks like an inconsistency. Two reasons it is not.
 
-> **`next@16.3.5` declares `@playwright/test` as an _optional peer dependency_.** npm
-> installs an optional peer once anything in the resolution tree makes it satisfiable. With
-> Playwright declared in a workspace — even in that workspace's `devDependencies`, even
-> under `--omit=dev` — npm satisfied next's optional peer and shipped **~18 MB**
-> (`@playwright/test` + `playwright` + `playwright-core`) to the node.
+**Optional peer dependencies defeat `--omit=dev`.** npm installs an optional peer as soon as
+anything in the resolution tree makes it satisfiable. A package that declares
+`@playwright/test` as an optional peer — web frameworks do — will therefore pull Playwright
+onto a deployed node merely because some workspace in the tree declares it, even in that
+workspace's `devDependencies`, even under `--omit=dev`. That is tens of megabytes of browser
+tooling on a production node, and nothing in the manifest shows it coming.
 
-Measured on the real scaffold: 30 packages with the e2e workspace, **26** without. Removing
-only the Playwright declaration dropped it to 27, which isolates the cause to the
-declaration rather than to anything else in the tree.
+Keeping Playwright out of the workspace graph entirely is the only form of this that does
+not depend on which packages happen to be installed.
 
-The structural argument points the same way. The e2e suite is the executable spec: it runs
-against **any** implementation via `BASE_URL` — Harper, Vercel, Supabase — so it is not a
-component of this application and should not be in its dependency graph.
+**The e2e suite is not part of this application.** It is the executable spec: it runs
+against **any** implementation via `BASE_URL` — Harper, Vercel, Supabase — so it does not
+belong in the dependency graph of one of them.
 
 `npm pack` still ships `e2e/**` as source (kilobytes), so a deployed node remains a
 self-describing E2E target; its dependencies are simply never installed there.
@@ -105,8 +101,7 @@ make this class of leak invisible in the manifest.
 
 - If `node_modules` already exists in the payload, **install is skipped entirely** and the
   runtime is treated as opaque for redeploy comparison. Never ship `node_modules`.
-- **There is now a `.npmignore`, and it REPLACES `.gitignore` for packing — it does not
-  merge with it.** Anything `.gitignore` excludes must be repeated there or it lands in the
+- **`.npmignore` REPLACES `.gitignore` for packing — it does not merge with it.** Anything `.gitignore` excludes must be repeated there or it lands in the
   deployed component. It exists because the ~800 MB dataset is committed to git (it is the
   benchmark's contract) but must not ship in a deploy payload: it is loaded separately via
   the operations API, outside the measured run.
@@ -134,22 +129,19 @@ ecommerce-store/            repo root = Harper component root
   SPEC.md                   numbered, stack-neutral requirements
 ```
 
-### Why the harness is here after all
+### Why the harness lives here
 
-An earlier version of this document said measurement scaffolding "does not live here at
-all" — that it belonged in the benchmarks repo, shared across comparisons, so that a
-customer reading the reference saw an application rather than a benchmark rig.
+`bench/` and `containers/` are measurement scaffolding, and scaffolding shared across
+comparisons belongs in the benchmarks repo. It is here because there is one implementation,
+so there is nothing yet to share it *with*, and a harness developed apart from the only
+target it runs against is a harness nobody runs.
 
-`bench/` and `containers/` are that scaffolding, and they are here. The intent stands and
-the location changed for a practical reason: there is one implementation, so there is
-nothing yet to share the harness *with*, and a harness developed apart from the only target
-it runs against is a harness nobody runs. It moves to the benchmarks repo when a second
-target makes it genuinely shared — which is also the point at which "identical for every
-target" stops being vacuous.
+It moves to the benchmarks repo when a second target makes it genuinely shared — which is
+the same point at which "containerized identically for every target" stops being vacuous.
 
-Until then the separation is by directory and by README, not by repo: nothing under
-`resources/` or `packages/` imports from `bench/`, and `.npmignore` keeps both out of a
-deployed component.
+Until then the separation is by directory, not by repo: nothing under `resources/` or
+`packages/` imports from `bench/`, and `.npmignore` keeps both out of a deployed component.
+A customer reading this reference should see an ecommerce application, not a benchmark rig.
 
 ## Open
 

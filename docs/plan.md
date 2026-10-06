@@ -33,11 +33,11 @@ The benchmarks repo's methodology is binding here. Results are never published f
 | Conformance suite | Every MUST covered, no stubs remaining — with one caveat recorded under Open |
 | Load harness | Works; knows what it cannot claim |
 | Containers | Works, 2 CPU / 2 GiB target, with snapshot restore between trials |
-| CI | Runs on push. Red from the day the repo went public: the conformance job asserted Harper's version at a hardcoded global prefix the runner does not use. Fixed in `8985365`; **not yet confirmed green by a run** |
+| CI | Repo checks and conformance, on every push. LFS is pulled only when the dataset changes. The conformance job has not yet completed green |
 
 ## Next
 
-1. **A `bench`-scale run that completes.** The first attempt died of generator heap exhaustion partway up the ladder (observations below). The generator is fixed and the ladder re-ranged; this has not been re-run.
+1. **A `bench`-scale run that completes.** No run has yet finished the full ladder at `bench` scale, so the observations below are partial and nothing downstream of them is settled.
 2. **A ground-truth correctness guard in the harness.** The measurement rules require it and the harness does not have it. This is the largest outstanding hole in the measurement story — see `bench/README.md`.
 3. **Confirm `FRESH_MS`.** SPEC.md §6 now sets it provisionally; the figure wants a real run behind it, and `PDP-003` / `WRITE-002` depend on it.
 4. **An in-application background writer.** The harness drives writes through the operations API. That is fine for coherence pressure but is not the same as the application doing it.
@@ -71,15 +71,15 @@ What it suggests, pending a run that completes:
 - **Capacity is somewhere between 100 and 200 rps**, against 2,000+ rps at `dev` scale on the
   same container. A ~13x drop is what a working set exceeding memory looks like, so
   `DATA-004` appears to be doing exactly what it was written for.
-- **The ladder was mis-ranged by roughly 10x.** Four of five steps sat past collapse, which
-  locates no inflection point. The default now brackets the suggested range.
+- **The ladder default brackets this range.** A ladder whose steps all sit past collapse
+  locates no inflection point, which is the one thing the ladder exists to find.
 - **Cache hit rate climbs but stays low** (18% → 33%). At `dev` it reached 77% in the first
   step. Worth watching: it may simply be a cold cache over a far larger key space, or the
   hot set may be too diffuse at this catalog size even with the skew.
 
 ## Open
 
-Carried from two rounds of cross-model review (Claude subagent, agy/Gemini, codex) against the foundation, plus a documentation review on 2026-10-06. Fixes are in `4c7630b`, `91b5650` and the commits following `5ac14b9`.
+Known gaps, each with why it is still open rather than closed.
 
 | | Why it is still open |
 |---|---|
@@ -107,14 +107,3 @@ Recorded because the gap between "we measured something" and "we may say this" i
 - **No cross-target comparison.** There is one implementation. Containerization is identical-by-construction only because there is nothing to be identical *to* yet.
 - **No per-component CPU breakdown.** Harper is one process; the framework/database/cache split has no analogue until an assembled stack exists.
 - **Nothing from the `dev` dataset.** It fits entirely in memory, which is the one thing the benchmark data must not do.
-
-## Done
-
-- **P0 scaffold and structural decisions** — repo root is the component root (forced: `deploy_component` takes a single tree and Harper does not implement npm's `#path:` extension). Plain npm workspaces, no vendoring. `e2e/` deliberately outside the workspace.
-- **Narrowed to the benchmarks P0.** Everything removed is preserved with its reasoning in [`future-work.md`](future-work.md).
-- **Application, dataset, harness** — the eight tables, both endpoints, deterministic generator, open-model load ladder that locates saturation.
-- **Two datasets** — `dev` for iteration, `bench` sized to exceed the container's memory.
-- **Containers** — fixed resource budget, generator outside it, bridge networking, plain HTTP, pinned Harper, snapshot restore between trials, all recorded.
-- **Git LFS** — history rewritten so the dataset never existed as plain blobs.
-- **The conformance suite** — every MUST covered, stubs eliminated, with the caveat recorded under Open.
-- **CI** — repo checks plus conformance, with LFS pulled only when the dataset changes. The repo-checks job passes; the conformance job's first green run is still pending.

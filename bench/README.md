@@ -55,26 +55,24 @@ Run `bench/run.mjs` directly and you get none of the orchestrator's guarantees: 
 
 ## Why the access distribution is load-bearing
 
-An earlier version drew keys uniformly over 20,000 products x 4 tiers x 4 regions — a 320,000-key space a short run almost never revisits. Measured cache-hit rate was **2.5%**. A cache nobody asks for twice cannot be measured, and neither can the cost of invalidating it, so `WRITE-003` and most of §6 were unmeasurable without anyone noticing.
+Keys are drawn with skew because uniform draws make the cache unmeasurable. A uniform draw over the catalog crossed with tier and region spans a key space a short run almost never revisits, and the measured hit rate collapses to near zero. A cache nobody asks for twice cannot be measured, and neither can the cost of invalidating it — which silently takes `WRITE-003` and most of §6 out of reach without any test failing.
 
-With the shared skew (1% of the catalog takes 50% of traffic) the same workload measured **77.7% rising to 89.3%** across the ladder. Nothing about the application changed. Both of those figures are `dev`-scale, where the catalog fits in memory; at `bench` scale the hit rate is far lower, which is its own open question rather than a regression.
+The skew is defined in `@ecommerce-store/spec` and shared with the dataset generator, so the dataset's hot products and the workload's hot products are the same products. A hot subset is what makes cache-hit rate mean anything.
+
+Hit rate is far lower at `bench` scale than at `dev`, where the catalog fits in memory. Whether that is a cold cache over a much larger key space or a hot set too diffuse for the skew to concentrate is open — see `docs/plan.md`.
 
 ## Observations
 
-Numbers this harness has produced are recorded in [`docs/plan.md`](../docs/plan.md), with the conditions and the caveats that apply to each. They are **not** repeated here.
-
-That is deliberate. An earlier version of this file carried its own ladder table, which went stale the moment the dataset was re-ranged and then sat here misreporting the target's capacity by an order of magnitude. Observations belong in one place, dated, next to the statement of what may not yet be claimed from them.
+Numbers this harness produces are recorded in [`docs/plan.md`](../docs/plan.md), with the conditions and caveats that apply to each. They are **not** repeated here: observations belong in one place, dated, beside the statement of what may not yet be claimed from them. A second copy drifts from the first.
 
 **No run this harness has produced is a publishable result** — see the gaps above, and `docs/plan.md`'s "What may not be claimed yet".
 
-## Known harness history
+## Keeping the generator out of the measurement
 
-The generator has been the failure point three times, which is the specific thing the measurement rules warn about:
+The rule the measurement rules press hardest: prove the load generator is not the bottleneck. Three properties of this harness exist for that, and each is easy to get wrong in a way no test catches.
 
-1. **Scheduled every arrival up front** with `setTimeout` and exhausted memory at high rates.
-2. **Buffered every response body**, and failed the same way once the target saturated.
-3. **Held too much in flight at `bench` scale.** The in-flight ceiling was set as a safety valve, without noticing it is also a measurement choice: a ceiling far above the target's steady-state outstanding count queues work and measures the generator's own backlog rather than the target. It also retained a per-request `Server-Timing` string when only one flag is ever read from it.
+- **Arrivals are not scheduled up front.** Materializing the whole timeline costs memory proportional to the run, and the generator dies before the target does.
+- **Response bodies are not retained.** Only the fields actually read are kept per sample — notably not the `Server-Timing` string, when a single flag is all that is ever read from it. At `bench` scale aggregates run to tens of kilobytes, and a saturated step holds a great many at once.
+- **The in-flight ceiling is a measurement choice, not just a safety valve.** A target serving a given rate at sub-second latency has roughly that many requests outstanding at steady state. A ceiling far above that queues work and measures the generator's own backlog rather than the target.
 
-All three are fixed. They are recorded because "prove the load generator is not the bottleneck" is a rule that has earned its place here once per rewrite, and the third one got through two rounds of review before a `bench`-scale run found it.
-
-Fixing (3) also surfaced that abandoned requests were not aborted at step end, so a saturated step's stragglers completed during the *next* step and were attributed to a rate they were never offered at.
+Abandoned requests are aborted at step end. Otherwise a saturated step's stragglers complete during the *next* step and are attributed to a rate they were never offered at.
