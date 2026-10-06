@@ -1,6 +1,6 @@
 # Ecommerce Store — Application Specification
 
-**Spec version:** `0.2.0-draft` · **Status:** P0 draft · **Last updated:** 2026-10-01
+**Spec version:** `0.2.0-draft` · **Status:** P0 draft · **Last updated:** 2026-10-06
 
 Scope, methodology, and the rules governing how results may be described are defined by [Harper Application Architecture Benchmarks](https://github.com/HarperFast/application-architecture-benchmarks). That document is binding. This one defines only the application.
 
@@ -109,7 +109,7 @@ The write-shaped read path, and the primary endpoint under test. Prices a cart.
 
 Normative, because promotion stacking is order-dependent and an unspecified order makes two correct implementations disagree on the total — which the measurement rules classify as non-equivalent semantics, an invalid cell rather than a close one.
 
-> **Each cart-wide promotion (`exclusive`, `threshold`) and each `bogo` promotion applies at most once per cart. Each `stackable` promotion applies at most once per eligible line.** This is the rule that decides most of the rest; an earlier draft left it implicit and a cart-wide 34%-off promotion eligible for three lines priced the cart to zero, as a well-formed deterministic 200.
+> **Each cart-wide promotion (`exclusive`, `threshold`) and each `bogo` promotion applies at most once per cart. Each `stackable` promotion applies at most once per eligible line.** This is the rule that decides most of the rest. Left implicit, a single cart-wide promotion eligible for several lines applies once per line and compounds — a large enough one prices the cart to zero and returns a well-formed, deterministic, entirely wrong 200.
 
 > **All discounts draw on one budget: the line's remaining amount.** Cart-wide discounts are allocated across the lines they are eligible for, in proportion to what each still has left, by largest remainder with ties on ascending SKU. Separate cart-wide and per-line accumulators let both discount the same money, which the 60% cap then concealed.
 

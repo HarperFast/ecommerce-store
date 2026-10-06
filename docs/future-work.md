@@ -1,8 +1,6 @@
 # Future work
 
-Everything here was designed, then scoped out when P0 narrowed to two endpoints and a background writer. It is kept because the *decisions* cost more to rediscover than the code did to write, and because several were argued through to a conclusion that will still apply when the scope reopens.
-
-Code for any of it is recoverable from git history at `a9ddedb`. The code is not the valuable part.
+Everything here is out of scope for P0, which is two endpoints, one background writer, eight tables and one dataset. Each entry records the decision that will apply when the scope reopens, because those conclusions cost more to rediscover than the code costs to write.
 
 Ordered roughly as the benchmarks README orders its own Future Work: storefront UI, auth flows, product listing pages, search, checkout commit, images, realtime.
 
@@ -10,9 +8,9 @@ Ordered roughly as the benchmarks README orders its own Future Work: storefront 
 
 ## Product listing, facets, and search
 
-**Was:** `PLP-001`–`PLP-009`, `SRCH-001`–`SRCH-006`. Category listing with descendant expansion, facet counts over the full filtered set, multi-select facets, sort, pagination, and full-text search over the same faceted path.
+**Scope when it returns:** category listing with descendant expansion, facet counts over the full filtered set, multi-select facets, sort, pagination, and full-text search over the same faceted path.
 
-**The requirement worth preserving verbatim**, because it is the one an optimisation silently breaks:
+**The requirement worth stating verbatim now**, because it is the one an optimisation silently breaks:
 
 > A facet's own counts are computed with that facet's selections **excluded** from the filter, so a shopper can see the effect of switching a value within a facet they have already used. Counts for all other facets reflect every active selection.
 
@@ -22,15 +20,15 @@ Three facet-counting mechanisms were identified, undecided pending measurement: 
 
 ## Pages and server rendering
 
-**Was:** `PAGE-001`–`PAGE-006`. Server-rendered home, listing, detail and search; facets and pagination as real URLs; functional without client-side JavaScript.
+**Scope when it returns:** server-rendered home, listing, detail and search; facets and pagination as real URLs; functional without client-side JavaScript.
 
-**Now out of scope by rule**, not by priority — the benchmarks README excludes anything dominated by static asset delivery, browser rendering, or client-side evaluation.
+**Out of scope by rule**, not by priority — the benchmarks README excludes anything dominated by static asset delivery, browser rendering, or client-side evaluation.
 
-**Consequence for the scaffold:** `@harperfast/nextjs` and `next.config.ts` have nothing to do at P0. The wiring is retained but inert. Note that the repo-root constraint in [`structure.md`](structure.md) does **not** depend on Next.js — the `deploy_component` single-tree constraint forces it independently — so dropping Next.js later would not reopen that decision.
+**Consequence for the scaffold:** `@harperfast/nextjs`, `next.config.ts`, React and the shared UI package were **removed**, not retained inert — carrying them shipped hundreds of megabytes to every node for a framework with nothing to do at P0. Note that the repo-root constraint in [`structure.md`](structure.md) does **not** depend on Next.js — the `deploy_component` single-tree constraint forces it independently — so reintroducing a framework with the storefront reopens nothing there.
 
 ## Conformance profiles
 
-**Was:** requirements partitioned into `DATA` (JSON API, implementable by a backend-only platform) and `APP` (DATA plus pages, sessions, checkout), with comparisons only ever drawn within a shared profile.
+**The idea:** partition requirements into `DATA` (JSON API, implementable by a backend-only platform) and `APP` (DATA plus pages, sessions, checkout), and draw comparisons only within a shared profile.
 
 **Moot at P0**: every target is a backend stack and nothing renders, so there is one profile and the partition carries no information.
 
@@ -38,7 +36,7 @@ Three facet-counting mechanisms were identified, undecided pending measurement: 
 
 ## Identity and accounts
 
-**Was:** `AUTH-001`–`AUTH-007`, plus a full design. Two principals, deliberately distinct:
+**Scope when it returns:** two principals, deliberately distinct:
 
 | | Operator | Shopper |
 |---|---|---|
@@ -66,7 +64,7 @@ The argument for splitting them: platform-native access control is DB-enforced a
 
 At the commonly-cited N=2¹⁷, **eight concurrent logins reserve 1 GiB** — an entire small node. And Node's `crypto.scrypt` defaults `maxmem` to 32 MiB and **throws** at every set at or above 32 MiB per hash, at first real login rather than at startup.
 
-Tentative choice was N=2¹⁵ r=8 p=3 with explicit `maxmem`, provisional pending re-measurement on target hardware. Two caveats recorded at the time: the numbers are from an 18 GiB workstation that cannot show memory pressure, and the claim that these are the *recommended* sets is recall rather than verified — confirm against the current OWASP Password Storage Cheat Sheet before relying on it.
+The provisional choice is N=2¹⁵ r=8 p=3 with an explicit `maxmem`, pending re-measurement on target hardware. Two caveats attach to the table above: it was produced on a workstation with far more memory than a node, so it cannot show memory pressure, and the claim that these are the *recommended* parameter sets is unverified — confirm against the current OWASP Password Storage Cheat Sheet before relying on it.
 
 If auth is ever measured, the parameters must be **pinned identically across implementations**, or the comparison measures whichever work factor each team picked.
 
@@ -78,9 +76,9 @@ Unblocked and unanswered. Nothing at P0 depends on it.
 
 ## Loyalty redemption
 
-`QUOTE-004` originally required the loyalty balance to be read **and applied**. It now requires it read and carried, and redemption moved here.
+`QUOTE-004` requires the loyalty balance to be read and carried in the response, not redeemed against it. Redemption lives here instead.
 
-The reasoning is worth keeping, because it is a general test for whether a requirement earns its place: redeeming a balance in a quote is arithmetic on a field already fetched in wave 2 — no extra read, no extra wave, no cache pressure. It would have imposed a normative rule on every competing implementation (conversion rate, cap, position in the promotion order, treatment of the tax base) in exchange for distinguishing no architecture. A requirement that costs every implementer and separates no stack is measurement noise.
+The reasoning is a general test for whether a requirement earns its place: redeeming a balance in a quote is arithmetic on a field already fetched in wave 2 — no extra read, no extra wave, no cache pressure. It would have imposed a normative rule on every competing implementation (conversion rate, cap, position in the promotion order, treatment of the tax base) in exchange for distinguishing no architecture. A requirement that costs every implementer and separates no stack is measurement noise.
 
 Redemption becomes genuinely interesting at **checkout**, where it decrements a balance under concurrency — a contended per-customer write, which is exactly the kind of thing the comparison exists to expose. 39% of seeded customers carry a balance, median 26,038 minor units against cart subtotals of roughly 20,000–120,000, so a policy will need a cap when it arrives.
 
@@ -92,11 +90,9 @@ Redemption becomes genuinely interesting at **checkout**, where it decrements a 
 
 ## Dataset tiers
 
-**Was:** three tiers — `sm` (1k products), `md` (10k), `lg` (50k products / 100k+ SKUs) — with `lg` deliberately sized to exceed a free node's memory.
+**There is one benchmark dataset size, deliberately.** The benchmarks README is explicit that a dataset fitting entirely in cache is not representative, and that sweeping store size as a variable is out of scope. The property that matters is that the working set must exceed memory, so results are not an artifact of everything fitting in RAM.
 
-**Now one size.** The benchmarks README is explicit that a dataset fitting entirely in cache is not representative, and that sweeping store size as a variable is out of scope. The surviving idea is the *reason* `lg` existed: the working set must exceed memory, so results are not an artifact of everything fitting in RAM.
-
-`sm` may still earn its place as a CI fixture, but as a development convenience, never as a benchmark target.
+A small fixture earns its place as a development and CI convenience, never as a benchmark target. That is what `dev` is.
 
 ## Media
 

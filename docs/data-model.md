@@ -2,13 +2,9 @@
 
 Status: **P0 design.** Implements SPEC.md §3.
 
-SPEC.md defines the eight tables neutrally. This document records the Harper-side design and the one decision that reversed when P0 narrowed.
+SPEC.md defines the eight tables neutrally. This document records the Harper-side design and the reasoning behind the choices that are not forced.
 
 ## Aggregates are computed on read, not maintained on write
-
-An earlier draft of this specification decided the opposite. That decision rested on two requirements that are now future work: facet counts over 100k+ SKUs on every listing request, and `sort=price_asc` over 50,000 products. Sorting by a value derived from many variants is not a query anyone ships without materializing it first, so aggregates were maintained on write.
-
-Neither requirement exists in P0, and with them gone the argument inverts.
 
 **The fan-out is the measurement.** P0 exists because an architectural difference only appears where the architecture does work — four to five dependent waves and 60–150 reads per quote. Pre-aggregating `availability` into a per-region rollup would remove reads the specification deliberately requires, which `DATA-001` forbids outright:
 
@@ -20,33 +16,33 @@ Neither requirement exists in P0, and with them gone the argument inverts.
 
 So: resolve on read. The one genuinely maintained aggregate, `reviewRollup`, is a field on `product` seeded with the dataset — real systems maintain it asynchronously, and nothing in P0 writes reviews.
 
-**This reverses cleanly if listing pages return.** The earlier reasoning is preserved in [`future-work.md`](future-work.md), including the three candidate facet-counting mechanisms. Reintroducing faceting reintroduces the pressure to materialize, and the decision should be re-made then rather than inherited from either draft.
+**This holds only while nothing sorts or filters on an aggregate.** Facet counts over the catalog, or `sort=price_asc` across products, are queries nobody ships without materializing first — so listing pages reintroduce the pressure to maintain aggregates on write, and the decision has to be made again on the requirements that exist then. The candidate facet-counting mechanisms are in [`future-work.md`](future-work.md).
 
 ## Promotion eligibility, and why it is indexed with a sentinel
 
-An empty eligibility array means "no restriction on this dimension" — and an empty array is exactly what an index cannot match. That single fact broke this twice:
+An empty eligibility array means "no restriction on this dimension", and an empty array is exactly what an index cannot match. That one fact rules out both obvious implementations:
 
-1. **Indexed, incomplete.** Probing `tiers = <tier>` and `categoryIds = <category>` could never return a promotion unrestricted on *both*. 14% of the corpus was unreachable, and it was precisely the globally-applicable 14%.
-2. **Correct, unscalable.** Replacing it with a full sorted scan was right, and ran over all 5,000 `bench` promotions on every quote.
+- **Probe the authoritative arrays directly** — `tiers = <tier>` and `categoryIds = <category>` — and a promotion unrestricted on *both* dimensions can never be returned. The promotions lost are precisely the globally-applicable ones, so the quote is wrong in the direction nobody notices.
+- **Scan the table and filter in application code** — correct, and it reads every promotion in the corpus on every quote.
 
-The rows now carry `tierKeys` and `categoryKeys`: the same values, or `['*']` when unrestricted. "Applies to everything" becomes an indexable value like any other, so one `in` probe per dimension covers both cases and the two conditions AND to a **superset** of the eligible set. `isEligible` then applies the authoritative arrays.
+So the rows carry `tierKeys` and `categoryKeys`: the same values, or `['*']` when unrestricted. "Applies to everything" becomes an indexable value like any other, so one `in` probe per dimension covers both cases and the two conditions AND to a **superset** of the eligible set. `isEligible` then applies the authoritative arrays.
 
 Superset, never subset, is the property that matters — a narrowing that can exclude an eligible promotion makes quotes silently cheaper and silently wrong. `scripts/verify-promotion-index.mjs` checks it against every tier × category combination offline, and runs in CI.
 
 `skus` is deliberately not an index dimension: a SKU-restricted promotion is still reachable through its other two, so indexing it would add a third probe for no additional reach.
 
-**Corpus note.** Selectivity is a property of the data as much as the index. Nearly half the promotions used to be unrestricted on tier and on category, which no real store looks like — a handful of offers run storewide, the rest target a category, a tier or a SKU. With that corrected, a probe returns 7.2% of the table instead of 31%.
+**Selectivity is a property of the data as much as the index.** The promotion corpus is generated so that a handful of offers run storewide and the rest target a category, a tier or a SKU — which is what a real store looks like, and what makes the sentinel probe selective. A corpus where most promotions are unrestricted on both dimensions defeats the index no matter how it is built, because `['*']` is then the common case rather than the exception.
 
 ## Entities
 
 ```graphql
-type Cart @table @export {
+type Cart @table @export @sealed {
   id: ID @primaryKey
   customerId: String @indexed
   lines: Any            # [{ sku, quantity }] — embedded; one read yields the cart
 }
 
-type Customer @table @export {
+type Customer @table @export @sealed {
   id: ID @primaryKey
   tier: String @indexed
   loyaltyBalance: Int
@@ -54,7 +50,7 @@ type Customer @table @export {
   taxJurisdiction: String @indexed
 }
 
-type Product @table @export {
+type Product @table @export @sealed {
   id: ID @primaryKey
   title: String
   categoryIds: [String] @indexed
@@ -63,7 +59,7 @@ type Product @table @export {
   reviewRollup: Any
 }
 
-type Variant @table @export {
+type Variant @table @export @sealed {
   sku: ID @primaryKey
   productId: String @indexed
   options: Any
@@ -71,31 +67,36 @@ type Variant @table @export {
   weight: Int
 }
 
-type Inventory @table @export {
+type Inventory @table @export @sealed {
   id: ID @primaryKey      # `${sku}:${locationId}`
   sku: String @indexed
   locationId: String @indexed
   onHand: Int
 }
 
-type Location @table @export {
+type Location @table @export @sealed {
   id: ID @primaryKey
   region: String @indexed
   priority: Int
 }
 
-type Promotion @table @export {
+type Promotion @table @export @sealed {
   id: ID @primaryKey
   kind: String @indexed
-  tiers: [String] @indexed
-  skus: [String] @indexed
-  categoryIds: [String] @indexed
+  # Authoritative eligibility. NOT indexed — an empty array means "no restriction on this
+  # dimension", and an index cannot match an empty array. `isEligible` reads these.
+  tiers: [String]
+  skus: [String]
+  categoryIds: [String]
+  # The indexable form of the same values, or ['*'] when unrestricted. See above.
+  tierKeys: [String] @indexed
+  categoryKeys: [String] @indexed
   thresholdMinor: Int
   amountMinor: Int
   amountBasisPoints: Int
 }
 
-type Rate @table @export {
+type Rate @table @export @sealed {
   id: ID @primaryKey
   kind: String @indexed
   region: String @indexed
@@ -104,6 +105,24 @@ type Rate @table @export {
   jurisdiction: String @indexed
   amountMinor: Int
   basisPoints: Int
+}
+```
+
+And the one table the specification does not describe, because it is derived rather than a
+source of truth:
+
+```graphql
+# A cache, not an entity. CACHE-001: dropping it changes no response body, only latency.
+# Keyed by product x tier x region because PDP-002 says the value varies by both. The
+# expiration is the backstop behind write-through invalidation, not the primary mechanism —
+# CACHE-002 requires every cached value to be bounded and to say which bound applied.
+type ProductView @table(expiration: 120) {
+  id: ID @primaryKey
+  productId: String @indexed
+  tier: String
+  region: String
+  payload: Any
+  assembledAt: Long
 }
 ```
 
