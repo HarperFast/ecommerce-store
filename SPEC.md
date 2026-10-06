@@ -1,6 +1,6 @@
 # Ecommerce Store — Application Specification
 
-**Spec version:** `0.2.0-draft` · **Status:** P0 draft · **Last updated:** 2026-10-01
+**Spec version:** `0.2.0-draft` · **Status:** P0 draft · **Last updated:** 2026-10-06
 
 Scope, methodology, and the rules governing how results may be described are defined by [Harper Application Architecture Benchmarks](https://github.com/HarperFast/application-architecture-benchmarks). That document is binding. This one defines only the application.
 

@@ -4,7 +4,7 @@ A Harper-native ecommerce catalog service, and the reference implementation for 
 
 It exists to be three things at once: a worked example of how to build an efficient Harper application, the home of the specification every benchmark implementation is measured against, and a target that is tested and benchmarked against each significant Harper release.
 
-> **Status: pre-release.** The specification has not passed its review gate and the conformance suite is incomplete. See [`docs/plan.md`](docs/plan.md).
+> **Status: pre-release.** The specification has not passed its human review gate, and no run this repo has produced is a result. See [`docs/plan.md`](docs/plan.md) for what state each piece is in and what may not yet be claimed.
 
 ## The application
 
@@ -55,8 +55,10 @@ npm run dev
 ```
 
 ```bash
-npm run seed -- --scale dev && node scripts/load-dataset.mjs --scale dev
+node scripts/load-dataset.mjs --scale dev
 ```
+
+The dataset is committed, so there is nothing to generate. `npm run seed` regenerates it in place and is for changing the dataset, not for setting up — see [`CONTRIBUTING.md`](CONTRIBUTING.md) before reaching for it.
 
 ```bash
 curl -s -X POST localhost:9926/cart/cart-000042/quote -H 'content-type: application/json' -d '{}'
@@ -64,16 +66,18 @@ curl -s -X POST localhost:9926/cart/cart-000042/quote -H 'content-type: applicat
 
 ## Datasets
 
-| | Rows | Stored | Use |
-|---|---|---|---|
-| `dev` | 46,583 | plain git, 5 MB | Local work. Loads in under two seconds. **Never a benchmark target** — it fits entirely in memory, the one thing the benchmark data must not do. |
-| `bench` | 40,656,446 | Git LFS, 329 MB compressed | The benchmark. ~4.5 GB expanded, against a 2 GiB container. |
+| | Stored | Use |
+|---|---|---|
+| `dev` | plain git | Local work. Loads in seconds. **Never a benchmark target** — it fits entirely in memory, the one thing the benchmark data must not do. |
+| `bench` | Git LFS | The benchmark. Expands to several times the target container's memory budget. |
+
+Row counts and checksums are in each dataset's `MANIFEST.json`, which is the contract; they are not restated here, because a second copy is only a second thing to be wrong.
 
 Both are generated once, committed, and verified by checksum before every load. Implementations do not re-derive them — identity is established by hash, not by every runtime reproducing one PRNG stream. [`docs/seed-design.md`](docs/seed-design.md).
 
 ## Conformance
 
-[`SPEC.md`](SPEC.md) states 27 numbered, stack-neutral requirements. [`packages/spec`](packages/spec) is its machine-readable half; [`e2e/`](e2e) is its executable half, where every test names the requirement ids it covers.
+[`SPEC.md`](SPEC.md) states the numbered, stack-neutral requirements. [`packages/spec`](packages/spec) is its machine-readable half; [`e2e/`](e2e) is its executable half, where every test names the requirement ids it covers.
 
 ```bash
 npm run check && npm run test:e2e

@@ -26,7 +26,7 @@ Three facet-counting mechanisms were identified, undecided pending measurement: 
 
 **Now out of scope by rule**, not by priority — the benchmarks README excludes anything dominated by static asset delivery, browser rendering, or client-side evaluation.
 
-**Consequence for the scaffold:** `@harperfast/nextjs` and `next.config.ts` have nothing to do at P0. The wiring is retained but inert. Note that the repo-root constraint in [`structure.md`](structure.md) does **not** depend on Next.js — the `deploy_component` single-tree constraint forces it independently — so dropping Next.js later would not reopen that decision.
+**Consequence for the scaffold:** `@harperfast/nextjs`, `next.config.ts`, React and the shared UI package were **removed**, not retained inert — carrying them shipped hundreds of megabytes to every node for a framework with nothing to do at P0. Note that the repo-root constraint in [`structure.md`](structure.md) does **not** depend on Next.js — the `deploy_component` single-tree constraint forces it independently — so reintroducing a framework with the storefront reopens nothing there.
 
 ## Conformance profiles
 

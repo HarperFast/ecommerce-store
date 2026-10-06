@@ -15,8 +15,8 @@ Those two pull against each other. `harper-vs-vercel-benchmark` resolved it with
 
 ## The constraint (why the app is at the repo root)
 
-**The repo root is the Harper component root and the Next.js app root.** Not a preference —
-a hard constraint, from two independent places:
+**The repo root is the Harper component root.** Not a preference — a hard constraint, from
+two independent places:
 
 1. **Harper does not implement npm's `#path:` git extension.** `deploy_component` with
    `package=github:owner/repo` resolves through `parseGitReference`
@@ -118,25 +118,44 @@ make this class of leak invisible in the manifest.
 ## Layout
 
 ```
-ecommerce-store/            repo root = Harper component root = Next.js app root
+ecommerce-store/            repo root = Harper component root
   config.yaml               component config; plugin ORDER is load-bearing (see file)
-  schemas/*.graphql         the eight tables, @export'd
-  resources/*.js            the two endpoints
+  schemas/store.graphql     the eight tables, @export'd, plus the derived ProductView cache
+  resources/*.js            the two endpoints, the admin write surface, and their lib/
   packages/
     spec/                   route contract + requirement ids — stack-neutral, runtime
     seed/                   deterministic dataset generator — dev-only
   e2e/                      Playwright suite, the executable spec — NOT a workspace
   dataset/                  the committed, checksummed dataset
+  scripts/                  dataset load/verify, deploy simulation, run-record validation
+  bench/                    the load harness
+  containers/               the containerized run topology and its orchestrator
   docs/
   SPEC.md                   numbered, stack-neutral requirements
 ```
 
-Measurement scaffolding does not live here at all. The harness — clock pinning, load ladder,
-per-target CPU accounting, correctness guards — is shared across comparisons and lives in
-the benchmarks repo. A customer reading this reference should see an ecommerce application,
-not a benchmark rig.
+### Why the harness is here after all
+
+An earlier version of this document said measurement scaffolding "does not live here at
+all" — that it belonged in the benchmarks repo, shared across comparisons, so that a
+customer reading the reference saw an application rather than a benchmark rig.
+
+`bench/` and `containers/` are that scaffolding, and they are here. The intent stands and
+the location changed for a practical reason: there is one implementation, so there is
+nothing yet to share the harness *with*, and a harness developed apart from the only target
+it runs against is a harness nobody runs. It moves to the benchmarks repo when a second
+target makes it genuinely shared — which is also the point at which "identical for every
+target" stops being vacuous.
+
+Until then the separation is by directory and by README, not by repo: nothing under
+`resources/` or `packages/` imports from `bench/`, and `.npmignore` keeps both out of a
+deployed component.
 
 ## Open
 
-- **`server-timing`.** Lands with the first endpoint, not after it (`OBS-003`). Its
-  `config.yaml` ordering constraint is already recorded.
+- **`server-timing` is emitted inline, not by a plugin.** Both endpoints set the header
+  directly, which satisfies `OBS-001`/`OBS-003` and needs no plugin ordering. The commented
+  block in `config.yaml` records the ordering constraint for the day a plugin does the
+  decomposition — earlier-registered http listeners are outer middleware layers, so it
+  would have to be registered before any handler whose time it decomposes. Left commented
+  rather than deleted because the constraint is the expensive part to rediscover.

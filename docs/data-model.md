@@ -27,7 +27,7 @@ So: resolve on read. The one genuinely maintained aggregate, `reviewRollup`, is 
 An empty eligibility array means "no restriction on this dimension" — and an empty array is exactly what an index cannot match. That single fact broke this twice:
 
 1. **Indexed, incomplete.** Probing `tiers = <tier>` and `categoryIds = <category>` could never return a promotion unrestricted on *both*. 14% of the corpus was unreachable, and it was precisely the globally-applicable 14%.
-2. **Correct, unscalable.** Replacing it with a full sorted scan was right, and ran over all 5,000 `bench` promotions on every quote.
+2. **Correct, unscalable.** Replacing it with a full sorted scan was right, and ran over every promotion in the `bench` corpus on every quote.
 
 The rows now carry `tierKeys` and `categoryKeys`: the same values, or `['*']` when unrestricted. "Applies to everything" becomes an indexable value like any other, so one `in` probe per dimension covers both cases and the two conditions AND to a **superset** of the eligible set. `isEligible` then applies the authoritative arrays.
 
@@ -40,13 +40,13 @@ Superset, never subset, is the property that matters — a narrowing that can ex
 ## Entities
 
 ```graphql
-type Cart @table @export {
+type Cart @table @export @sealed {
   id: ID @primaryKey
   customerId: String @indexed
   lines: Any            # [{ sku, quantity }] — embedded; one read yields the cart
 }
 
-type Customer @table @export {
+type Customer @table @export @sealed {
   id: ID @primaryKey
   tier: String @indexed
   loyaltyBalance: Int
@@ -54,7 +54,7 @@ type Customer @table @export {
   taxJurisdiction: String @indexed
 }
 
-type Product @table @export {
+type Product @table @export @sealed {
   id: ID @primaryKey
   title: String
   categoryIds: [String] @indexed
@@ -63,7 +63,7 @@ type Product @table @export {
   reviewRollup: Any
 }
 
-type Variant @table @export {
+type Variant @table @export @sealed {
   sku: ID @primaryKey
   productId: String @indexed
   options: Any
@@ -71,31 +71,36 @@ type Variant @table @export {
   weight: Int
 }
 
-type Inventory @table @export {
+type Inventory @table @export @sealed {
   id: ID @primaryKey      # `${sku}:${locationId}`
   sku: String @indexed
   locationId: String @indexed
   onHand: Int
 }
 
-type Location @table @export {
+type Location @table @export @sealed {
   id: ID @primaryKey
   region: String @indexed
   priority: Int
 }
 
-type Promotion @table @export {
+type Promotion @table @export @sealed {
   id: ID @primaryKey
   kind: String @indexed
-  tiers: [String] @indexed
-  skus: [String] @indexed
-  categoryIds: [String] @indexed
+  # Authoritative eligibility. NOT indexed — an empty array means "no restriction on this
+  # dimension", and an index cannot match an empty array. `isEligible` reads these.
+  tiers: [String]
+  skus: [String]
+  categoryIds: [String]
+  # The indexable form of the same values, or ['*'] when unrestricted. See above.
+  tierKeys: [String] @indexed
+  categoryKeys: [String] @indexed
   thresholdMinor: Int
   amountMinor: Int
   amountBasisPoints: Int
 }
 
-type Rate @table @export {
+type Rate @table @export @sealed {
   id: ID @primaryKey
   kind: String @indexed
   region: String @indexed
@@ -104,6 +109,24 @@ type Rate @table @export {
   jurisdiction: String @indexed
   amountMinor: Int
   basisPoints: Int
+}
+```
+
+And the one table the specification does not describe, because it is derived rather than a
+source of truth:
+
+```graphql
+# A cache, not an entity. CACHE-001: dropping it changes no response body, only latency.
+# Keyed by product x tier x region because PDP-002 says the value varies by both. The
+# expiration is the backstop behind write-through invalidation, not the primary mechanism —
+# CACHE-002 requires every cached value to be bounded and to say which bound applied.
+type ProductView @table(expiration: 120) {
+  id: ID @primaryKey
+  productId: String @indexed
+  tier: String
+  region: String
+  payload: Any
+  assembledAt: Long
 }
 ```
 
