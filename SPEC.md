@@ -63,12 +63,12 @@ Reaching eight tables required three judgment calls. Each is recorded because ea
 
 `DATA-001` **MUST** — An implementation uses exactly these eight logical entities **as its source of truth**. A stack MAY represent them differently where its idiom demands (a normalized schema may split embedded line items into their own relation), and MUST then document the mapping. What it MUST NOT do is pre-join or denormalize its *source of truth* into a shape that removes a read the specification requires — that is the measurement, not an optimization.
 
-**Derived caches are permitted and expected**, and are not a violation of the above: a cache holds a copy, not the truth. The distinction is testable — deleting every cache must change no response, only its latency. A separated stack caching the product aggregate in Redis and a collapsed stack caching it in-process are doing the same thing; what differs is the cost of keeping it coherent, which is what §6 exists to measure.
+**Derived caches are permitted and expected**, and are not a violation of the above: a cache holds a copy, not the truth. The distinction is testable — deleting every cache must change no response, only its latency. A separated stack caching the product aggregate in Redis and a collapsed stack caching it in-process are doing the same thing; what differs is the cost of keeping it coherent, which is what the *Background writes* section exists to measure.
 
 ### Caching
 
 - `CACHE-001` **MUST** — Caches are **derived**. Dropping every cache changes no response body, only latency. No cached value is authoritative, and nothing is served from a cache that could not be recomputed from the eight entities.
-- `CACHE-002` **MUST** — Every cached value is bounded by `FRESH_MS` (§6) — by explicit invalidation on write, by expiry, or both. An implementation states which mechanism it relies on.
+- `CACHE-002` **MUST** — Every cached value is bounded by `FRESH_MS` (Background writes) — by explicit invalidation on write, by expiry, or both. An implementation states which mechanism it relies on.
 - `CACHE-003` **MUST** — A cache key includes every dimension the cached value varies by. Serving a value keyed on fewer dimensions than it varies by is a correctness failure, not a cache tuning choice.
 
 ### Rate table invariants
@@ -109,12 +109,12 @@ The write-shaped read path, and the primary endpoint under test. Prices a cart.
 - `QUOTE-002` **MUST** — Each line resolves its product and variant. A line naming an unknown sku fails the quote with `400`; it is not silently dropped.
 - `QUOTE-003` **MUST** — Availability per line is resolved against inventory across fulfillment locations in ascending `location.priority`, drawing from each in turn until the line's quantity is satisfied or the region's locations are exhausted.
 
-  **A shortfall does not change what is priced.** The line is priced at its full requested quantity and the unmet amount is reported as `shortfall`. Pricing only the available quantity would make a cart's total a function of live inventory, which the background writer (§6) is continuously changing — totals would drift under load for reasons unrelated to the architecture, and `QUOTE-008` determinism would hold only between writes. A quote prices what was asked for and states what cannot be filled.
+  **A shortfall does not change what is priced.** The line is priced at its full requested quantity and the unmet amount is reported as `shortfall`. Pricing only the available quantity would make a cart's total a function of live inventory, which the background writer (Background writes) is continuously changing — totals would drift under load for reasons unrelated to the architecture, and `QUOTE-008` determinism would hold only between writes. A quote prices what was asked for and states what cannot be filled.
 - `QUOTE-004` **MUST** — The customer's tier is **applied** to pricing, by the normative table in *Resolved unit price* below, and their loyalty balance is **read and carried** in the response.
 
   Carried, not applied, deliberately. Redeeming a balance is arithmetic on a field the quote already fetches in wave 2: no extra read, no extra wave, no cache pressure. It would impose a normative redemption rule — conversion, cap, position in the promotion order, treatment of the tax base — that every implementation must reproduce exactly, in exchange for distinguishing no architecture. Redemption becomes interesting at **checkout**, where it decrements a balance under concurrency: a contended per-customer write. It is recorded as future work there rather than as busywork here.
 - `QUOTE-005` **MUST** — Promotions are resolved by tier, SKU, and category — **including promotions unrestricted on any of those dimensions** — and evaluated in application code: **stacking, exclusivity, threshold, and BOGO** rules. Evaluation order is specified (below) so every implementation produces identical totals.
-- `QUOTE-006` **MUST** — Shipping is resolved by the customer's region and the cart's total weight, where total weight is `Σ (variant.weight × quantity)` over the merged lines, against the band contract in §3. Shipping is **not** discounted and **not** taxed.
+- `QUOTE-006` **MUST** — Shipping is resolved by the customer's region and the cart's total weight, where total weight is `Σ (variant.weight × quantity)` over the merged lines, against the band contract in Data model. Shipping is **not** discounted and **not** taxed.
 - `QUOTE-007` **MUST** — Tax is resolved by the customer's jurisdiction and applied to the post-discount subtotal.
 - `QUOTE-008` **MUST** — The quote is **deterministic**: the same cart against the same dataset state produces a byte-identical response. This is what makes the endpoint verifiable at all, and it is the ground-truth correctness guard the measurement rules require.
 - `QUOTE-009` **MUST** — An unknown cart id returns `404`.
@@ -136,8 +136,8 @@ disagree on every line of every quote, before pricing logic has run at all.
 `resolvedUnitPrice = round_half_up(basePrice × tierBasisPoints / 10000)`, in integer minor
 units. A tier absent from this table resolves as `standard`.
 
-The same resolved unit price is what §5 returns for a product aggregate, so a given variant
-at a given tier prices identically on both endpoints.
+The product aggregate resolves its price the same way, so a given variant at a given tier
+prices identically on both endpoints.
 
 ### Promotion evaluation order
 
@@ -180,7 +180,7 @@ The read-heavy leg. Mostly cacheable, but varies by `tier` and `region`.
 
 - `PDP-001` **MUST** — The response aggregates: the product, its variants, inventory for those variants, resolved price, review rollup, and related items.
 - `PDP-002` **MUST** — Resolved price varies by `tier`; availability varies by `region`. Two requests differing only in `tier` or only in `region` MUST be able to produce different responses, and an implementation that caches MUST include both in its cache key. Serving one tier's price to another is a conformance failure.
-- `PDP-003` **MUST** — Inventory and price reflect background writes (§6) within `FRESH_MS`.
+- `PDP-003` **MUST** — Inventory and price reflect background writes (Background writes) within `FRESH_MS`.
 - `PDP-004` **MUST** — An unknown product id returns `404`.
 - `PDP-005` **SHOULD** — Related items are returned with enough detail to render without a further request.
 
@@ -193,7 +193,7 @@ A steady, low-rate stream of inventory and price updates against the same record
 **Not an endpoint under test.** Its own latency is not a headline metric. It exists so that caches have to stay coherent with their source of truth — a read-only workload lets a separated stack's cache fill once and never invalidate, which is not a cache any real store operates.
 
 - `WRITE-001` **MUST** — The writer updates `inventory` quantities and `variant` prices against records within the read path's working set, at a configured steady rate, **through the application's write surface**. A write made directly to the datastore updates the source of truth while invalidating nothing, so the cache converges only on expiry and the coherence cost this section exists to measure is never paid. A separated stack's write path has to evict its cache key for the same reason; this is the same work on the other architecture.
-- `WRITE-002` **MUST** — A committed write is observable on the product aggregate (§5) within `FRESH_MS`, and in quote pricing (§4) within `FRESH_MS`.
+- `WRITE-002` **MUST** — A committed write is observable on the product aggregate (GET /product/:id) within `FRESH_MS`, and in quote pricing (POST /cart/:id/quote) within `FRESH_MS`.
 - `WRITE-003` **MUST** — No implementation may satisfy `WRITE-002` by disabling caching. Measured cache-hit rates are recorded with every run precisely so that this is visible.
 - `WRITE-004` **MUST** — The write stream is identical in rate and key distribution for every target. It is not a per-target tuning budget.
 
@@ -235,4 +235,4 @@ P0 does not complete until this document passes: self-review → cross-model rev
 | Cross-model review | ☑ 2026-10-01 — two rounds, Claude + codex (agy timed out both rounds) |
 | Human review | ☐ |
 
-**Known open:** `FRESH_MS` (§6), the eight-table foldings (§3), and the promotion evaluation order (§4) — the last because it is invented here rather than derived from a real system, and it determines whether two correct implementations agree on a total.
+**Known open:** `FRESH_MS` (Background writes), the eight-table foldings (Data model), and the promotion evaluation order (POST /cart/:id/quote) — the last because it is invented here rather than derived from a real system, and it determines whether two correct implementations agree on a total.

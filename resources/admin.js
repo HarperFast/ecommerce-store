@@ -1,16 +1,16 @@
 /**
- * The write surface — SPEC.md §6.
+ * The write surface — SPEC.md, "Background writes".
  *
  * The background writer drives these. It used to write straight to the tables through the
  * operations API, which worked but could never invalidate anything: the cache would only
- * converge on expiry, and §6's whole purpose is to make cache coherence a cost the
+ * converge on expiry, and Background writes's whole purpose is to make cache coherence a cost the
  * architecture actually pays.
  *
  * Writing through the application is also what a separated stack must do — its write path
  * updates Postgres and then evicts the Redis key. The fan-out below is the Harper side of
  * exactly that comparison.
  *
- * Not an endpoint under test: its own latency is not a headline metric (SPEC.md §6).
+ * Not an endpoint under test: its own latency is not a headline metric (SPEC.md, "Background writes").
  */
 import { Resource } from 'harper';
 import { REGIONS, TIERS, viewKey } from './product.js';

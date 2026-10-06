@@ -1,4 +1,4 @@
-/** Caching — SPEC.md §3. Derived, bounded, correctly keyed. */
+/** Caching — SPEC.md, "Data model". Derived, bounded, correctly keyed. */
 import { test, expect } from '@playwright/test';
 import { API, productSearchParams } from '@ecommerce-store/spec';
 import { covers } from '../lib/spec.ts';
@@ -40,7 +40,8 @@ test.describe('caching', () => {
 
 		const write = await request.post(`/admin/variant/${sku}`, { data: { basePrice: 54321 } });
 		expect(write.ok()).toBe(true);
-		// The fan-out is the cost SPEC.md §6 measures, so the write reports what it invalidated.
+		// The fan-out is the cost SPEC.md's Background writes section measures, so the write reports
+		// what it invalidated.
 		expect((await write.json()).invalidated).toBeGreaterThan(0);
 
 		const after = await request.get(url);

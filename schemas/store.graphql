@@ -1,4 +1,4 @@
-# The eight tables — SPEC.md §3, designed in docs/data-model.md.
+# The eight tables — SPEC.md, "Data model", designed in docs/data-model.md.
 #
 # Deliberately NOT pre-joined. The fan-out across these tables is what the benchmark
 # measures (DATA-001), so a shape that collapses a required read is a conformance failure,
@@ -28,7 +28,7 @@ type Product @table @export @sealed {
 	title: String
 	categoryIds: [String] @indexed
 	weight: Int
-	# Fans out to further Product reads — depth preserved, see docs/data-model.md §foldings.
+	# Fans out to further Product reads — depth preserved. SPEC.md, "Foldings, and what they cost".
 	relatedProductIds: [String]
 	# { count, averageCentistars } — a field, not a table. Nothing in P0 writes reviews.
 	reviewRollup: Any
@@ -91,7 +91,7 @@ type Rate @table @export @sealed {
 # ---------------------------------------------------------------------------------------
 # The cache.
 #
-# GET /product/:id is "mostly cacheable, varies by tier and region" (SPEC.md §5), so the
+# GET /product/:id is "mostly cacheable, varies by tier and region" (SPEC.md, "GET /product/:id"), so the
 # cached unit is the fully-resolved aggregate keyed by `${productId}:${tier}:${region}` —
 # 16 entries per product across 4 tiers and 4 regions.
 #
@@ -99,7 +99,7 @@ type Rate @table @export @sealed {
 # coherent two ways: explicit invalidation on every write that can change it, with the TTL
 # as the backstop that bounds staleness even if an invalidation is ever missed. An
 # implementation on a separated stack puts the same aggregate in Redis with the same key;
-# what differs is what invalidating it costs, which is exactly what SPEC.md §6 measures.
+# what differs is what invalidating it costs, which is exactly what SPEC.md, "Background writes" measures.
 #
 # NOT @export'ed: it is an internal cache, not a public surface. Reads go through
 # /product/:id so cache status can be reported (OBS-002).

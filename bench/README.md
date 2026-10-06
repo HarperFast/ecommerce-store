@@ -55,7 +55,7 @@ Run `bench/run.mjs` directly and you get none of the orchestrator's guarantees: 
 
 ## Why the access distribution is load-bearing
 
-Keys are drawn with skew because uniform draws make the cache unmeasurable. A uniform draw over the catalog crossed with tier and region spans a key space a short run almost never revisits, and the measured hit rate collapses to near zero. A cache nobody asks for twice cannot be measured, and neither can the cost of invalidating it — which silently takes `WRITE-003` and most of §6 out of reach without any test failing.
+Keys are drawn with skew because uniform draws make the cache unmeasurable. A uniform draw over the catalog crossed with tier and region spans a key space a short run almost never revisits, and the measured hit rate collapses to near zero. A cache nobody asks for twice cannot be measured, and neither can the cost of invalidating it — which silently takes `WRITE-003` and most of the write-coherence requirements out of reach without any test failing.
 
 The skew is defined in `@ecommerce-store/spec` and shared with the dataset generator, so the dataset's hot products and the workload's hot products are the same products. A hot subset is what makes cache-hit rate mean anything.
 

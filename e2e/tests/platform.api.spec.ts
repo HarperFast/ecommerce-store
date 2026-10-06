@@ -1,5 +1,5 @@
 /**
- * Background writes and the remaining quote instrumentation — SPEC.md §6, §7.
+ * Background writes and the remaining quote instrumentation — SPEC.md, "Background writes" and "Observability".
  *
  * The dataset requirements (DATA-001/002/003/005) and the run-level ones (DATA-004,
  * WRITE-001/003/004) are NOT here, deliberately. They are properties of the committed
@@ -12,7 +12,7 @@ import { test, expect } from '@playwright/test';
 import { API } from '@ecommerce-store/spec';
 import { covers } from '../lib/spec.ts';
 
-/** SPEC.md §6. The coherence BUDGET, not the expected latency. */
+/** SPEC.md, "Background writes". The coherence BUDGET, not the expected latency. */
 const FRESH_MS = 1000;
 
 test.describe('background writes', () => {

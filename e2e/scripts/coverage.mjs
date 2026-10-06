@@ -1,5 +1,5 @@
 /**
- * Assert that every MUST in SPEC.md is covered by at least one test — SPEC.md §8.
+ * Assert that every MUST in SPEC.md is covered by at least one test — SPEC.md, "Conformance".
  *
  * Static: scans test titles for the `[REQ-ID ...]` prefix that `covers()` emits, so it runs
  * without a live implementation. Exits non-zero on a gap.

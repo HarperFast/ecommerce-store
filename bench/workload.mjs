@@ -1,5 +1,5 @@
 /**
- * The request mix — SPEC.md §4, §5, §6.
+ * The request mix — SPEC.md, "POST /cart/:id/quote", "GET /product/:id", "Background writes".
  *
  * Deliberately shares nothing with the application. The harness must be able to drive any
  * implementation of the specification, so it speaks HTTP and canonical paths only.
@@ -83,7 +83,7 @@ export function makeRequestFactory({ baseUrl, cartIds, productIds, quoteShare = 
 }
 
 /**
- * The background write stream — SPEC.md §6.
+ * The background write stream — SPEC.md, "Background writes".
  *
  * Not an endpoint under test. It exists so caches have to stay coherent with their source
  * of truth: a read-only workload lets a cache fill once and never invalidate, which is not
@@ -102,7 +102,7 @@ export function makeWriterFactory({ baseUrl, skus, inventoryIds, seed = 7 }) {
 	 * Writes go through the APPLICATION, not the operations API.
 	 *
 	 * A direct table write updates the source of truth and invalidates nothing, so the cache
-	 * would only converge on expiry and §6's cache-coherence cost — the thing it exists to
+	 * would only converge on expiry and "Background writes"'s cache-coherence cost — the thing it exists to
 	 * measure — would never be paid. A separated stack's write path has to evict its Redis key
 	 * for the same reason; this is the same work on the other architecture.
 	 */
