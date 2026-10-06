@@ -33,7 +33,7 @@ The benchmarks repo's methodology is binding here. Results are never published f
 | Conformance suite | Every MUST covered, no stubs remaining — with one caveat recorded under Open |
 | Load harness | Works; knows what it cannot claim |
 | Containers | Works, 2 CPU / 2 GiB target, with snapshot restore between trials |
-| CI | Repo checks and conformance, on every push. LFS is pulled only when the dataset changes. The conformance job has not yet completed green |
+| CI | Repo checks and conformance, on every push and pull request. LFS is pulled only when the dataset changes. Both jobs pass |
 
 ## Next
 
