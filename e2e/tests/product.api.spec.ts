@@ -1,9 +1,9 @@
-/** Product aggregate — SPEC.md, "GET /product/:id". The read-heavy leg. */
+/** Product aggregate — SPEC.md#get-productidtierregion. The read-heavy leg. */
 import { test, expect } from '@playwright/test';
 import { API, productSearchParams } from '@ecommerce-store/spec';
 import { covers } from '../lib/spec.ts';
 
-/** SPEC.md, "Background writes". The coherence BUDGET, not the expected latency. */
+/** SPEC.md#background-writes. The coherence BUDGET, not the expected latency. */
 const FRESH_MS = 1000;
 
 const get = (id: string, tier: string, region: string) => `${API.product(id)}?${productSearchParams({ tier, region })}`;

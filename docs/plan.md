@@ -22,7 +22,7 @@ The benchmarks repo's methodology is binding here. Results are never published f
 
 | Piece | State |
 |---|---|
-| `SPEC.md` | Written; two rounds of cross-model review applied. **Review gate not passed** — see SPEC.md, "Conformance", which is the only place gate status is tracked |
+| `SPEC.md` | Written; two rounds of cross-model review applied. **Review gate not passed** — see [Conformance](SPEC.md#conformance), which is the only place gate status is tracked |
 | Schema | Built — the eight specified tables, plus `ProductView`, a derived cache |
 | Caching | `ProductView`, a `sourcedFrom` cache keyed by product × tier × region, invalidated write-through with an expiry backstop |
 | Write surface | `POST /admin/variant/:sku`, `POST /admin/inventory/:id` — write and invalidate |
@@ -41,7 +41,7 @@ The benchmarks repo's methodology is binding here. Results are never published f
 2. **A correctness suite with expected values.** The measurement rules require a ground-truth guard and the harness does not have one — see `bench/README.md`. The shape: a suite separate from conformance, keyed to the loaded dataset's manifest checksum, asserting *values* rather than properties. Conformance asserts a quote is well-formed and self-consistent; two implementations can both pass it and disagree on every total, which is what this closes.
 
    The expected values are **data, not a shared function**. A calculator in this repo emits them; no other implementation imports anything. A stack that computes pricing inside one SQL query compares against the same table as Harper does — the answer is stack-neutral, the procedure deliberately is not.
-3. **Confirm `FRESH_MS`.** SPEC.md's *Background writes* section now sets it provisionally; the figure wants a real run behind it, and `PDP-003` / `WRITE-002` depend on it.
+3. **Confirm `FRESH_MS`.** [Background writes](../SPEC.md#background-writes) now sets it provisionally; the figure wants a real run behind it, and `PDP-003` / `WRITE-002` depend on it.
 4. **An in-application background writer.** The harness drives writes through the operations API. That is fine for coherence pressure but is not the same as the application doing it.
 
 ## Blocked on someone else
@@ -49,7 +49,7 @@ The benchmarks repo's methodology is binding here. Results are never published f
 | | Needed from |
 |---|---|
 | **A Linux host.** On macOS, Podman runs in a VM: CPU/memory limits bind against the VM's share, not the host's, and the VM boundary sits in the network path. Clock pinning is impossible, so no cycle-normalized efficiency figure exists. | Maintainers |
-| **Review gate** — tracked in SPEC.md, "Conformance". Human review outstanding. | Maintainers |
+| **Review gate** — tracked in [Conformance](SPEC.md#conformance). Human review outstanding. | Maintainers |
 | **The promotion evaluation order is invented.** Normative because two correct implementations otherwise disagree on a total. Nobody who has built a pricing engine has read it. | A reviewer with pricing experience |
 | **OAuth authorization-server question** — drafted at [`questions/oauth-authorization-server-scope.md`](questions/oauth-authorization-server-scope.md), unsent. Not blocking; auth is future work. | `@harperfast/oauth` maintainers |
 

@@ -1,5 +1,5 @@
 /**
- * The dataset generator — SPEC.md, "Data model", docs/seed-design.md.
+ * The dataset generator — SPEC.md#data-model, docs/seed-design.md.
  *
  * Yields rows table by table so the output streams: the benchmark dataset is deliberately
  * larger than memory, and holding it all before writing would force every implementation to

@@ -37,9 +37,8 @@ for (const req of REQUIREMENTS) {
 	}
 }
 
-console.log(`SPEC.md: ${inSpec.size} ids · registry: ${inRegistry.size} ids`);
 if (problems.length) {
-	console.error(`\nFAIL — ${problems.length} inconsistency(ies):`);
+	console.error('FAIL — SPEC.md and the registry disagree:');
 	for (const p of problems) console.error(`  ${p}`);
 	process.exit(1);
 }

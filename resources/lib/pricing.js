@@ -1,5 +1,5 @@
 /**
- * The pricing engine — SPEC.md, "Resolved unit price" and "Promotion evaluation order".
+ * The pricing engine — SPEC.md#resolved-unit-price and SPEC.md#promotion-evaluation-order.
  *
  * Pure: no I/O, no clock, no randomness. Everything it needs is passed in, which is what
  * makes QUOTE-008 (byte-identical quotes for the same cart and dataset state) testable
@@ -18,7 +18,7 @@
 /** Tier multipliers in basis points. Fixed, not drawn — must match packages/seed. */
 const TIER_BASIS_POINTS = { standard: 10000, silver: 9500, gold: 9000, platinum: 8500 };
 
-/** Round half-up to the minor unit. Applied per discount, not once at the end — SPEC.md, "Promotion evaluation order". */
+/** Round half-up to the minor unit. Applied per discount, not once at the end — SPEC.md#promotion-evaluation-order. */
 function applyBasisPoints(amount, basisPoints) {
 	return Math.floor((amount * basisPoints + 5000) / 10000);
 }
@@ -64,7 +64,7 @@ function meetsThreshold(promotion, subtotal) {
 const byPromotionId = (a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 
 /**
- * Stacking limits — SPEC.md, "Promotion evaluation order" steps 8 and 9.
+ * Stacking limits — SPEC.md#promotion-evaluation-order steps 8 and 9.
  *
  * Real stores bound stacking; without a bound, a corpus with enough unrestricted stackables
  * compounds a cart toward zero and the benchmark prices free carts. These are normative so
@@ -93,7 +93,7 @@ function groupByPromotion(candidates) {
 }
 
 /**
- * Evaluate promotions in the normative order — SPEC.md, "Promotion evaluation order".
+ * Evaluate promotions in the normative order — SPEC.md#promotion-evaluation-order.
  *
  * The order is normative because stacking is order-dependent: without it two correct
  * implementations disagree on a total, which the measurement rules classify as
@@ -222,7 +222,7 @@ export function evaluatePromotions({ lines: inputLines, candidates, subtotal }) 
 			.filter((l) => l && l.quantity >= 2 && (remaining.get(l.sku) ?? 0) > 0)
 			.sort((a, b) => a.unitPrice - b.unitPrice || (a.sku < b.sku ? -1 : 1))[0];
 		if (!line) continue;
-		// The promotion's own amount, against that ONE unit — not the line (SPEC.md, "Promotion evaluation order" step 4).
+		// The promotion's own amount, against that ONE unit — not the line (SPEC.md#promotion-evaluation-order step 4).
 		// The corpus carries 10000 basis points on every bogo row, which makes the unit free;
 		// reading the magnitude rather than assuming it keeps a corpus that says otherwise correct.
 		const touched = drawDown([line.sku], discountFor(entry.promotion, line.unitPrice));

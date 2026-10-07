@@ -2,7 +2,7 @@
  * The requirement registry — the machine-readable index of SPEC.md.
  *
  * Every test in the verification suite names the requirement ids it covers, and every MUST
- * must be covered by at least one test (SPEC.md, "Conformance"). `coverageGaps()` makes that checkable
+ * must be covered by at least one test (SPEC.md#conformance). `coverageGaps()` makes that checkable
  * rather than aspirational.
  *
  * Ids are PERMANENT. Withdraw a requirement by setting `withdrawn: true`; never reuse an id.

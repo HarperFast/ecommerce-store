@@ -6,7 +6,7 @@ Scope, methodology, and the rules governing how results may be described are def
 
 ---
 
-## 1. What this document is
+## What this document is
 
 The reference specification for the application under benchmark. It exists to be implemented more than once — on Harper, and on assembled stacks — so the implementations can be compared.
 
@@ -26,7 +26,7 @@ P0 is two endpoints, one background writer, eight tables, and one dataset. Delib
 
 Storefront UI, auth, product listing, search, checkout commit, images, and realtime are **future work**. The reasoning behind each, and the decisions already taken on them, are preserved in [`docs/future-work.md`](docs/future-work.md) so they are not rediscovered from scratch.
 
-## 2. How to read this document
+## How to read this document
 
 Every requirement has a permanent id, `AREA-NNN`. Withdrawn requirements are struck through and their ids retired, never reused — conformance reports reference them forever.
 
@@ -38,7 +38,7 @@ Areas: `DATA` dataset and schema · `QUOTE` cart quote · `PDP` product aggregat
 
 ---
 
-## 3. Data model
+## Data model
 
 Eight tables. Field names are normative for the API; storage representation is not specified.
 
@@ -63,7 +63,7 @@ Reaching eight tables required three judgment calls. Each is recorded because ea
 
 `DATA-001` **MUST** — An implementation uses exactly these eight logical entities **as its source of truth**. A stack MAY represent them differently where its idiom demands (a normalized schema may split embedded line items into their own relation), and MUST then document the mapping. What it MUST NOT do is pre-join or denormalize its *source of truth* into a shape that removes a read the specification requires — that is the measurement, not an optimization.
 
-**Derived caches are permitted and expected**, and are not a violation of the above: a cache holds a copy, not the truth. The distinction is testable — deleting every cache must change no response, only its latency. A separated stack caching the product aggregate in Redis and a collapsed stack caching it in-process are doing the same thing; what differs is the cost of keeping it coherent, which is what the *Background writes* section exists to measure.
+**Derived caches are permitted and expected**, and are not a violation of the above: a cache holds a copy, not the truth. The distinction is testable — deleting every cache must change no response, only its latency. A separated stack caching the product aggregate in Redis and a collapsed stack caching it in-process are doing the same thing; what differs is the cost of keeping it coherent, which is what [Background writes](#background-writes) exists to measure.
 
 ### Caching
 
@@ -93,7 +93,7 @@ in the dataset and an implementation may rely on them rather than defending agai
 
 ---
 
-## 4. `POST /cart/:id/quote`
+## `POST /cart/:id/quote`
 
 The write-shaped read path, and the primary endpoint under test. Prices a cart.
 
@@ -174,7 +174,7 @@ Rounding: each discount rounds half-up to the minor unit at the point it is appl
 
 ---
 
-## 5. `GET /product/:id?tier=&region=`
+## `GET /product/:id?tier=&region=`
 
 The read-heavy leg. Mostly cacheable, but varies by `tier` and `region`.
 
@@ -186,7 +186,7 @@ The read-heavy leg. Mostly cacheable, but varies by `tier` and `region`.
 
 ---
 
-## 6. Background writes
+## Background writes
 
 A steady, low-rate stream of inventory and price updates against the same records the read path touches.
 
@@ -207,7 +207,7 @@ Setting it too tight makes the benchmark a cache-invalidation test; too loose an
 
 ---
 
-## 7. Observability
+## Observability
 
 - `OBS-001` **MUST** — Both endpoints emit `Server-Timing` decomposing server-side time into at least data access, application compute, and total.
 - `OBS-002` **MUST** — Responses indicate cache status, and each implementation documents its caching mechanism. The measurement rules require measured cache-hit rates to be recorded with every run; this is how.
@@ -215,7 +215,7 @@ Setting it too tight makes the benchmark a cache-invalidation test; too loose an
 
 ---
 
-## 8. Conformance
+## Conformance
 
 An implementation publishes a conformance report: every requirement id, and pass / fail / deviation-with-reason.
 

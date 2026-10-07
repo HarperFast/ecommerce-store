@@ -1,5 +1,5 @@
 /**
- * POST /cart/:id/quote — the primary endpoint under test. SPEC.md, "POST /cart/:id/quote".
+ * POST /cart/:id/quote — the primary endpoint under test. SPEC.md#post-cartidquote.
  *
  * Four to five dependent waves, 60-150 record reads, real pricing logic. Every response is
  * unique to its cart, so no implementation can win here by caching a response (QUOTE-001).

@@ -1,6 +1,6 @@
 # Dataset generation
 
-Status: **P0 design.** Implements SPEC.md, "Data model".
+Status: **P0 design.** Implements [Data model](SPEC.md#data-model).
 
 ## Generate once, commit the artifact
 

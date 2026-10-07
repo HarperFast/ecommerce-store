@@ -61,7 +61,7 @@ const OPS_URL = argOf('ops', 'http://localhost:9925');
  *
  * `harper dev` disables auth; `harper run` — the only supported benchmark configuration —
  * does not. Without these every write 401s, `fetch` resolves normally, nothing checks the
- * status, and the run record still reports `writesIssued`. The entire SPEC.md, "Background writes"
+ * status, and the run record still reports `writesIssued`. The entire SPEC.md#background-writes
  * cache-coherence workload silently does not happen.
  */
 const OPS_AUTH = process.env.HDB_ADMIN_USERNAME
@@ -308,7 +308,7 @@ async function step({ rate, seconds, nextRequest, nextWrite, writeRate, label })
 		writesIssued,
 		writeFailures,
 		// Cache entries invalidated by this step's writes. The invalidation fan-out is the cost
-		// SPEC.md the "Background writes" section exists to measure, so it is recorded rather than inferred.
+		// SPEC.md#background-writes exists to measure, so it is recorded rather than inferred.
 		invalidations,
 		// Requests still outstanding when the drain deadline expired. They are absent from the
 		// latency distribution, so a non-zero value means the tail is censored.

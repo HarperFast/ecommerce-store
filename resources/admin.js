@@ -1,5 +1,5 @@
 /**
- * The write surface — SPEC.md, "Background writes".
+ * The write surface — SPEC.md#background-writes.
  *
  * The background writer drives these. It used to write straight to the tables through the
  * operations API, which worked but could never invalidate anything: the cache would only
@@ -10,7 +10,7 @@
  * updates Postgres and then evicts the Redis key. The fan-out below is the Harper side of
  * exactly that comparison.
  *
- * Not an endpoint under test: its own latency is not a headline metric (SPEC.md, "Background writes").
+ * Not an endpoint under test: its own latency is not a headline metric (SPEC.md#background-writes).
  */
 import { Resource } from 'harper';
 import { REGIONS, TIERS, viewKey } from './product.js';

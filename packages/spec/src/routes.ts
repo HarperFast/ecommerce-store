@@ -1,5 +1,5 @@
 /**
- * The route contract — SPEC.md, "POST /cart/:id/quote" and "GET /product/:id".
+ * The route contract — SPEC.md#post-cartidquote and SPEC.md#get-productidtierregion.
  *
  * Canonical paths. An implementation whose stack idiom differs MAY serve equivalent paths
  * and MUST then publish a mapping the verification suite is configured with.
@@ -29,7 +29,7 @@ export function productSearchParams({ tier, region }: ProductQuery): URLSearchPa
 	return params;
 }
 
-/** Promotion evaluation order — SPEC.md, "POST /cart/:id/quote". Normative: an unspecified order makes two correct implementations disagree on a total. */
+/** Promotion evaluation order — SPEC.md#post-cartidquote. Normative: an unspecified order makes two correct implementations disagree on a total. */
 export const PROMOTION_ORDER = ['exclusive', 'threshold', 'bogo', 'stackable'] as const;
 
 /** A non-canonical implementation declares its paths here; published with the comparison. */

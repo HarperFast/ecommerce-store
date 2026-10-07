@@ -77,8 +77,7 @@ for (const tier of TIERS) {
 	}
 }
 
-console.log(`scale ${scale}: ${promotions.length} promotions, ${checks} tier x category combinations checked`);
-console.log(`mean candidates per probe: ${(candidateTotal / checks).toFixed(0)} of ${promotions.length} (${((candidateTotal / checks / promotions.length) * 100).toFixed(1)}%)`);
+console.log(`mean probe selectivity: ${((candidateTotal / checks / promotions.length) * 100).toFixed(1)}% of the corpus`);
 
 if (missed) {
 	console.error(`\nFAIL — the index excluded ${missed} eligible promotion(s):`);
