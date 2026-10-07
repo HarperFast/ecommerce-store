@@ -22,7 +22,7 @@ The benchmarks repo's methodology is binding here. Results are never published f
 
 | Piece | State |
 |---|---|
-| `SPEC.md` | Written; two rounds of cross-model review applied. **Review gate not passed** — see [Conformance](SPEC.md#conformance), which is the only place gate status is tracked |
+| `SPEC.md` | Written; two rounds of cross-model review applied. **Review gate not passed** — see [Conformance](../SPEC.md#conformance), which is the only place gate status is tracked |
 | Schema | Built — the eight specified tables, plus `ProductView`, a derived cache |
 | Caching | `ProductView`, a `sourcedFrom` cache keyed by product × tier × region, invalidated write-through with an expiry backstop |
 | Write surface | `POST /admin/variant/:sku`, `POST /admin/inventory/:id` — write and invalidate |
@@ -49,16 +49,13 @@ The benchmarks repo's methodology is binding here. Results are never published f
 | | Needed from |
 |---|---|
 | **A Linux host.** On macOS, Podman runs in a VM: CPU/memory limits bind against the VM's share, not the host's, and the VM boundary sits in the network path. Clock pinning is impossible, so no cycle-normalized efficiency figure exists. | Maintainers |
-| **Review gate** — tracked in [Conformance](SPEC.md#conformance). Human review outstanding. | Maintainers |
+| **Review gate** — tracked in [Conformance](../SPEC.md#conformance). Human review outstanding. | Maintainers |
 | **The promotion evaluation order is invented.** Normative because two correct implementations otherwise disagree on a total. Nobody who has built a pricing engine has read it. | A reviewer with pricing experience |
 | **OAuth authorization-server question** — drafted at [`questions/oauth-authorization-server-scope.md`](questions/oauth-authorization-server-scope.md), unsent. Not blocking; auth is future work. | `@harperfast/oauth` maintainers |
 
 ## First bench-scale observations (2026-10-05) — NOT results
 
-A `bench`-scale run reached three ladder steps before the load generator died of heap
-exhaustion. The numbers below are recorded because they are the first evidence the dataset
-is doing its job, and discarded as measurements because the run did not complete, the
-generator was in trouble throughout, and the clock was not pinned.
+A `bench`-scale run reached three ladder steps before the load generator died of heap exhaustion. The numbers below are recorded because they are the first evidence the dataset is doing its job, and discarded as measurements because the run did not complete, the generator was in trouble throughout, and the clock was not pinned.
 
 | offered | achieved | p50 | p90 | p99 | errors | cache hit |
 |---|---|---|---|---|---|---|
@@ -70,14 +67,9 @@ Cold start to first response: **3,056 ms** — the first cold number the project
 
 What it suggests, pending a run that completes:
 
-- **Capacity is somewhere between 100 and 200 rps**, against 2,000+ rps at `dev` scale on the
-  same container. A ~13x drop is what a working set exceeding memory looks like, so
-  `DATA-004` appears to be doing exactly what it was written for.
-- **The ladder default brackets this range.** A ladder whose steps all sit past collapse
-  locates no inflection point, which is the one thing the ladder exists to find.
-- **Cache hit rate climbs but stays low** (18% → 33%). At `dev` it reached 77% in the first
-  step. Worth watching: it may simply be a cold cache over a far larger key space, or the
-  hot set may be too diffuse at this catalog size even with the skew.
+- **Capacity is somewhere between 100 and 200 rps**, against 2,000+ rps at `dev` scale on the same container. A ~13x drop is what a working set exceeding memory looks like, so `DATA-004` appears to be doing exactly what it was written for.
+- **The ladder default brackets this range.** A ladder whose steps all sit past collapse locates no inflection point, which is the one thing the ladder exists to find.
+- **Cache hit rate climbs but stays low** (18% → 33%). At `dev` it reached 77% in the first step. Worth watching: it may simply be a cold cache over a far larger key space, or the hot set may be too diffuse at this catalog size even with the skew.
 
 ## Open
 

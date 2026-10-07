@@ -1,9 +1,9 @@
 /**
  * Every reference to a section of SPEC.md must resolve to a heading that exists.
  *
- * References are written as anchors — `SPEC.md#background-writes` in code comments,
- * `[Background writes](SPEC.md#background-writes)` in documents — rather than as section
- * numbers or quoted heading text. An anchor is checkable; prose is not, which is how a
+ * References are written as anchors: a bare `SPEC.md#heading-anchor` in code comments, and a
+ * markdown link to the same in documents — rather than as section numbers or quoted heading
+ * text. An anchor is checkable and prose is not, which is how a
  * reference to a `#foldings` section of docs/data-model.md survived in schemas/store.graphql
  * long after that discussion had moved into SPEC.md.
  *
@@ -12,7 +12,7 @@
  *   node scripts/check-spec-anchors.mjs
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join, relative, extname } from 'node:path';
+import { join, relative, extname, dirname, resolve } from 'node:path';
 
 const ROOT = new URL('..', import.meta.url).pathname;
 const SPEC = 'SPEC.md';
@@ -45,8 +45,13 @@ function* files(dir) {
 
 const problems = [];
 
+// This file names anchors in its own documentation and error messages. It is the checker,
+// not a reference, so it does not check itself.
+const SELF = relative(ROOT, new URL(import.meta.url).pathname);
+
 for (const path of files(ROOT)) {
 	const rel = relative(ROOT, path);
+	if (rel === SELF) continue;
 	const source = readFileSync(path, 'utf8');
 	const lines = source.split('\n');
 
@@ -57,6 +62,17 @@ for (const path of files(ROOT)) {
 
 		for (const ref of refs) {
 			if (!anchors.has(ref)) problems.push(`${rel}:${i + 1}  SPEC.md#${ref} — no such heading`);
+		}
+
+		// A markdown link also has to point at SPEC.md from where it is written. The anchor can be
+		// perfect and the path still wrong, which is how every link in docs/ pointed at a sibling
+		// SPEC.md that is actually one directory up.
+		for (const [, target] of line.matchAll(/\]\((\.{0,2}[\w./-]*SPEC\.md)#[\w-]+\)/g)) {
+			const resolved = resolve(dirname(path), target);
+			if (resolved !== join(ROOT, SPEC)) {
+				const correct = relative(dirname(path), join(ROOT, SPEC)) || SPEC;
+				problems.push(`${rel}:${i + 1}  links to ${target} — from here that path is not ${SPEC}; use ${correct}`);
+			}
 		}
 	});
 }

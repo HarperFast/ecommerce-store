@@ -73,15 +73,9 @@ Reaching eight tables required three judgment calls. Each is recorded because ea
 
 ### Rate table invariants
 
-The `rate` table is looked up, never searched, so its contents carry a contract. These hold
-in the dataset and an implementation may rely on them rather than defending against them:
+The `rate` table is looked up, never searched, so its contents carry a contract. These hold in the dataset and an implementation may rely on them rather than defending against them:
 
-- **Shipping bands within a region are contiguous, non-overlapping, and inclusive at both
-  ends.** `weightMin` and `weightMax` are both inclusive, and the bands of a region cover
-  every non-negative weight — the topmost band is open-ended in effect. There is therefore
-  exactly one matching band for any cart, and **no fallback behaviour is specified because
-  no cart can reach one.** An implementation that finds zero or several matching bands has
-  loaded a dataset that violates this contract and should fail loudly rather than guess.
+- **Shipping bands within a region are contiguous, non-overlapping, and inclusive at both ends.** `weightMin` and `weightMax` are both inclusive, and the bands of a region cover every non-negative weight — the topmost band is open-ended in effect. There is therefore exactly one matching band for any cart, and **no fallback behaviour is specified because no cart can reach one.** An implementation that finds zero or several matching bands has loaded a dataset that violates this contract and should fail loudly rather than guess.
 - **Exactly one tax rate per jurisdiction.**
 
 ### Invariants
@@ -122,9 +116,7 @@ The write-shaped read path, and the primary endpoint under test. Prices a cart.
 
 ### Resolved unit price
 
-Before any promotion is considered, each line's unit price is `variant.basePrice` adjusted
-for the customer's tier. The adjustment is **normative** — without it two implementations
-disagree on every line of every quote, before pricing logic has run at all.
+Before any promotion is considered, each line's unit price is `variant.basePrice` adjusted for the customer's tier. The adjustment is **normative** — without it two implementations disagree on every line of every quote, before pricing logic has run at all.
 
 | Tier | Basis points | Effect |
 |---|---|---|
@@ -133,11 +125,9 @@ disagree on every line of every quote, before pricing logic has run at all.
 | `gold` | 9000 | 10% off |
 | `platinum` | 8500 | 15% off |
 
-`resolvedUnitPrice = round_half_up(basePrice × tierBasisPoints / 10000)`, in integer minor
-units. A tier absent from this table resolves as `standard`.
+`resolvedUnitPrice = round_half_up(basePrice × tierBasisPoints / 10000)`, in integer minor units. A tier absent from this table resolves as `standard`.
 
-The product aggregate resolves its price the same way, so a given variant at a given tier
-prices identically on both endpoints.
+The product aggregate resolves its price the same way, so a given variant at a given tier prices identically on both endpoints.
 
 ### Promotion evaluation order
 

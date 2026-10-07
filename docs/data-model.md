@@ -1,6 +1,6 @@
 # Data model
 
-Status: **P0 design.** Implements [Data model](SPEC.md#data-model).
+Status: **P0 design.** Implements [Data model](../SPEC.md#data-model).
 
 SPEC.md defines the eight tables neutrally. This document records the Harper-side design and the reasoning behind the choices that are not forced.
 
@@ -108,8 +108,7 @@ type Rate @table @export @sealed {
 }
 ```
 
-And the one table the specification does not describe, because it is derived rather than a
-source of truth:
+And the one table the specification does not describe, because it is derived rather than a source of truth:
 
 ```graphql
 # A cache, not an entity. CACHE-001: dropping it changes no response body, only latency.
@@ -134,5 +133,5 @@ type ProductView @table(expiration: 120) {
 
 ## Open
 
-- **The promotion evaluation order in [POST /cart/:id/quote](SPEC.md#post-cartidquote) is invented**, not derived from a real pricing engine. It is normative because the alternative is two correct implementations disagreeing on a total — but it should be sanity-checked against someone who has built one.
+- **The promotion evaluation order in [POST /cart/:id/quote](../SPEC.md#post-cartidquote) is invented**, not derived from a real pricing engine. It is normative because the alternative is two correct implementations disagreeing on a total — but it should be sanity-checked against someone who has built one.
 - **How selective the promotion index can get.** It narrows to 7.2% of the table on `dev`. Tier is the floor: four values means a tier probe can never return less than roughly a quarter plus the storewide share. A composite `(tierKey, categoryKey)` index, or folding tier into the category key, would go further — worth measuring at `bench` scale before building.
