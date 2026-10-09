@@ -3,7 +3,7 @@
  *
  * Every test names what it covers, as `covers('QUOTE-005')`, which prefixes the test title
  * with those ids. `scripts/coverage.mjs` then scans the suite and fails if any MUST has no
- * test — SPEC.md §8.
+ * test — SPEC.md#conformance.
  *
  * Using the title as the carrier (rather than a runtime registry) keeps coverage checkable
  * statically, without running the suite against a live implementation.

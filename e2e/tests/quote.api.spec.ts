@@ -1,5 +1,5 @@
 /**
- * Cart quote — SPEC.md §4. The primary endpoint under test.
+ * Cart quote — the primary endpoint under test. SPEC.md#post-cartidquote.
  *
  * P0 skeleton: titles bind to requirement ids and the shapes are stated; assertions are
  * fixme until P1 puts data behind them. Landing it now means the coverage check is real
@@ -11,7 +11,7 @@ import { covers } from '../lib/spec.ts';
 
 test.describe('cart quote', () => {
 	test(covers('QUOTE-001')('two carts with identical contents are priced independently'), async ({ request }) => {
-		// Response-level caching is a conformance failure (SPEC.md §4), and the signature of it
+		// Response-level caching is a conformance failure (SPEC.md#post-cartidquote), and the signature of it
 		// is a response whose cartId does not match the cart asked for. A repeat request must
 		// also re-do the work rather than return a stored body under a different key.
 		const ids = Array.from({ length: 24 }, (_, i) => `cart-${String(i * 31).padStart(6, '0')}`);
@@ -201,7 +201,7 @@ test.describe('cart quote', () => {
 			checked++;
 			const body = await response.json();
 			const lineSum = body.lines.reduce((sum: number, l: { lineTotal: number }) => sum + l.lineTotal, 0);
-			// The cap is FLOORED (SPEC.md §4): asserting only `<= subtotal` accepted a 90%
+			// The cap is FLOORED (SPEC.md#promotion-evaluation-order step 9): asserting only `<= subtotal` accepted a 90%
 			// discount, which is what the previous version of this test did.
 			const cap = Math.floor((body.subtotal * 6000) / 10000);
 			if (body.discountTotal > cap || body.discountTotal < 0 || body.subtotal !== lineSum) {

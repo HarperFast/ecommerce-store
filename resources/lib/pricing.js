@@ -1,5 +1,5 @@
 /**
- * The pricing engine — SPEC.md §4.
+ * The pricing engine — SPEC.md#resolved-unit-price and SPEC.md#promotion-evaluation-order.
  *
  * Pure: no I/O, no clock, no randomness. Everything it needs is passed in, which is what
  * makes QUOTE-008 (byte-identical quotes for the same cart and dataset state) testable
@@ -18,7 +18,7 @@
 /** Tier multipliers in basis points. Fixed, not drawn — must match packages/seed. */
 const TIER_BASIS_POINTS = { standard: 10000, silver: 9500, gold: 9000, platinum: 8500 };
 
-/** Round half-up to the minor unit. Applied per discount, not once at the end (SPEC.md §4). */
+/** Round half-up to the minor unit. Applied per discount, not once at the end — SPEC.md#promotion-evaluation-order. */
 function applyBasisPoints(amount, basisPoints) {
 	return Math.floor((amount * basisPoints + 5000) / 10000);
 }
@@ -64,7 +64,7 @@ function meetsThreshold(promotion, subtotal) {
 const byPromotionId = (a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 
 /**
- * Stacking limits — SPEC.md §4.
+ * Stacking limits — SPEC.md#promotion-evaluation-order steps 8 and 9.
  *
  * Real stores bound stacking; without a bound, a corpus with enough unrestricted stackables
  * compounds a cart toward zero and the benchmark prices free carts. These are normative so
@@ -93,7 +93,7 @@ function groupByPromotion(candidates) {
 }
 
 /**
- * Evaluate promotions in the normative order — SPEC.md §4.
+ * Evaluate promotions in the normative order — SPEC.md#promotion-evaluation-order.
  *
  * The order is normative because stacking is order-dependent: without it two correct
  * implementations disagree on a total, which the measurement rules classify as
@@ -106,11 +106,11 @@ function groupByPromotion(candidates) {
  *
  * Ties break on ascending promotion id at every step.
  *
- * Two accumulators, because cart-wide and per-line discounts cannot share one budget without
- * one silently eating the other's headroom:
- *   - `cartDiscount` for exclusive/threshold, capped at the subtotal
- *   - per-line `remaining`, which bogo/stackable draw down, so a line can never be discounted
- *     below zero and a percentage promotion compounds against what is actually left
+ * ONE budget: the per-line `remaining` map, which every phase draws down through `drawDown`.
+ * Cart-wide discounts are allocated across the lines they are eligible for in proportion to
+ * what each still has left. A separate cart-level accumulator alongside these lets both
+ * discount the same money — the cap bounds the total either way, so the double-spend never
+ * shows in `discountTotal`, only in per-line figures that stop summing to it.
  */
 export function evaluatePromotions({ lines: inputLines, candidates, subtotal }) {
 	/**
@@ -222,7 +222,10 @@ export function evaluatePromotions({ lines: inputLines, candidates, subtotal }) 
 			.filter((l) => l && l.quantity >= 2 && (remaining.get(l.sku) ?? 0) > 0)
 			.sort((a, b) => a.unitPrice - b.unitPrice || (a.sku < b.sku ? -1 : 1))[0];
 		if (!line) continue;
-		const touched = drawDown([line.sku], line.unitPrice);
+		// The promotion's own amount, against that ONE unit — not the line (SPEC.md#promotion-evaluation-order step 4).
+		// The corpus carries 10000 basis points on every bogo row, which makes the unit free;
+		// reading the magnitude rather than assuming it keeps a corpus that says otherwise correct.
+		const touched = drawDown([line.sku], discountFor(entry.promotion, line.unitPrice));
 		if (touched.length) attribute(entry, touched);
 	}
 

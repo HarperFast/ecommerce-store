@@ -1,5 +1,5 @@
 /**
- * GET /product/:id?tier=&region= — SPEC.md §5. The read-heavy leg.
+ * GET /product/:id?tier=&region= — SPEC.md#get-productidtierregion. The read-heavy leg.
  *
  * Fans out: product, its variants, inventory for those variants, then related products.
  * The fan-out is deliberate (DATA-001) — a pre-joined source of truth would remove the reads
@@ -9,7 +9,7 @@
  * `@table(expiration)` cache whose `sourcedFrom` resolver below does the assembly; a hit
  * returns without touching any of the eight entities. This is the Harper-native form of what
  * a separated stack does with Redis, and the comparison is about what keeping it coherent
- * costs, not about who remembered to cache (SPEC.md §3 Caching).
+ * costs, not about who remembered to cache (SPEC.md#caching).
  */
 import { Resource } from 'harper';
 import { resolveUnitPrice } from './lib/pricing.js';

@@ -1,5 +1,5 @@
 /**
- * Dataset generation — SPEC.md §3, designed in docs/seed-design.md.
+ * Dataset generation — SPEC.md#data-model, designed in docs/seed-design.md.
  *
  * P0 declares the contract; the generator itself is P1.
  *

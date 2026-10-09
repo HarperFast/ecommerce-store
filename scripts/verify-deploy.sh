@@ -31,9 +31,6 @@ echo "==> installing as Harper does"
 cd node
 npm install --force --omit=dev --no-audit --no-fund >/dev/null 2>&1
 
-COUNT="$(ls node_modules 2>/dev/null | grep -vc '^\.' || true)"
-echo "==> $COUNT top-level entries in node_modules"
-
 status=0
 for pkg in "${FORBIDDEN[@]}"; do
   if [ -e "node_modules/$pkg" ]; then
@@ -52,6 +49,6 @@ for pkg in @ecommerce-store/spec; do
 done
 
 if [ "$status" -eq 0 ]; then
-  echo "OK: node tree is clean ($(du -sh node_modules | cut -f1))"
+  echo "OK: nothing dev-only reached the node"
 fi
 exit "$status"

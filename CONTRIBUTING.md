@@ -34,7 +34,7 @@ Already cloned without it? `git lfs pull` fixes it in place. The `dev` dataset i
 npm run check
 ```
 
-That checks, each with a committed negative test, that `SPEC.md` agrees with the requirement registry, that every MUST is covered, that the promotion index returns a superset of the eligible set, that the dataset matches its manifest, that the tree typechecks, and that a simulated deploy lands nothing dev-only on a node.
+That checks, each with a committed negative test, that `SPEC.md` agrees with the requirement registry, that every reference to a section of `SPEC.md` resolves to a heading that exists, that every MUST is covered, that the promotion index returns a superset of the eligible set, that the dataset matches its manifest, that the tree typechecks, and that a simulated deploy lands nothing dev-only on a node.
 
 Then the conformance suite, which is the executable form of the specification:
 

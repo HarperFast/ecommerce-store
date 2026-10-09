@@ -103,8 +103,8 @@ try {
 	failures.push('DATA-005: the generator is not committed — a dataset nobody can regenerate is a magic file');
 }
 
-console.log(`dataset ${scale}: seed ${manifest.seed}, generator ${manifest.generatorVersion}, ${Object.keys(manifest.files).length} tables`);
-console.log(`  ${Object.values(manifest.files).reduce((n, f) => n + f.rows, 0).toLocaleString()} rows, checksums over uncompressed bytes`);
+console.log(`dataset ${scale}: seed ${manifest.seed}, generator ${manifest.generatorVersion}`);
+console.log('  checksums verified over uncompressed bytes');
 
 if (failures.length) {
 	console.error(`\nFAIL — ${failures.length} dataset requirement(s) not met:`);

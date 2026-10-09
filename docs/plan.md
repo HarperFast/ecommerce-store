@@ -22,7 +22,7 @@ The benchmarks repo's methodology is binding here. Results are never published f
 
 | Piece | State |
 |---|---|
-| `SPEC.md` | Written; two rounds of cross-model review applied. **Review gate not passed** — see SPEC.md §8, which is the only place gate status is tracked |
+| `SPEC.md` | Written; two rounds of cross-model review applied. **Review gate not passed** — see [Conformance](../SPEC.md#conformance), which is the only place gate status is tracked |
 | Schema | Built — the eight specified tables, plus `ProductView`, a derived cache |
 | Caching | `ProductView`, a `sourcedFrom` cache keyed by product × tier × region, invalidated write-through with an expiry backstop |
 | Write surface | `POST /admin/variant/:sku`, `POST /admin/inventory/:id` — write and invalidate |
@@ -38,8 +38,10 @@ The benchmarks repo's methodology is binding here. Results are never published f
 ## Next
 
 1. **A `bench`-scale run that completes.** No run has yet finished the full ladder at `bench` scale, so the observations below are partial and nothing downstream of them is settled.
-2. **A ground-truth correctness guard in the harness.** The measurement rules require it and the harness does not have it. This is the largest outstanding hole in the measurement story — see `bench/README.md`.
-3. **Confirm `FRESH_MS`.** SPEC.md §6 now sets it provisionally; the figure wants a real run behind it, and `PDP-003` / `WRITE-002` depend on it.
+2. **A correctness suite with expected values.** The measurement rules require a ground-truth guard and the harness does not have one — see `bench/README.md`. The shape: a suite separate from conformance, keyed to the loaded dataset's manifest checksum, asserting *values* rather than properties. Conformance asserts a quote is well-formed and self-consistent; two implementations can both pass it and disagree on every total, which is what this closes.
+
+   The expected values are **data, not a shared function**. A calculator in this repo emits them; no other implementation imports anything. A stack that computes pricing inside one SQL query compares against the same table as Harper does — the answer is stack-neutral, the procedure deliberately is not.
+3. **Confirm `FRESH_MS`.** [Background writes](../SPEC.md#background-writes) now sets it provisionally; the figure wants a real run behind it, and `PDP-003` / `WRITE-002` depend on it.
 4. **An in-application background writer.** The harness drives writes through the operations API. That is fine for coherence pressure but is not the same as the application doing it.
 
 ## Blocked on someone else
@@ -47,16 +49,13 @@ The benchmarks repo's methodology is binding here. Results are never published f
 | | Needed from |
 |---|---|
 | **A Linux host.** On macOS, Podman runs in a VM: CPU/memory limits bind against the VM's share, not the host's, and the VM boundary sits in the network path. Clock pinning is impossible, so no cycle-normalized efficiency figure exists. | Maintainers |
-| **Review gate** — tracked in SPEC.md §8. Human review outstanding. | Maintainers |
+| **Review gate** — tracked in [Conformance](../SPEC.md#conformance). Human review outstanding. | Maintainers |
 | **The promotion evaluation order is invented.** Normative because two correct implementations otherwise disagree on a total. Nobody who has built a pricing engine has read it. | A reviewer with pricing experience |
 | **OAuth authorization-server question** — drafted at [`questions/oauth-authorization-server-scope.md`](questions/oauth-authorization-server-scope.md), unsent. Not blocking; auth is future work. | `@harperfast/oauth` maintainers |
 
 ## First bench-scale observations (2026-10-05) — NOT results
 
-A `bench`-scale run reached three ladder steps before the load generator died of heap
-exhaustion. The numbers below are recorded because they are the first evidence the dataset
-is doing its job, and discarded as measurements because the run did not complete, the
-generator was in trouble throughout, and the clock was not pinned.
+A `bench`-scale run reached three ladder steps before the load generator died of heap exhaustion. The numbers below are recorded because they are the first evidence the dataset is doing its job, and discarded as measurements because the run did not complete, the generator was in trouble throughout, and the clock was not pinned.
 
 | offered | achieved | p50 | p90 | p99 | errors | cache hit |
 |---|---|---|---|---|---|---|
@@ -68,14 +67,9 @@ Cold start to first response: **3,056 ms** — the first cold number the project
 
 What it suggests, pending a run that completes:
 
-- **Capacity is somewhere between 100 and 200 rps**, against 2,000+ rps at `dev` scale on the
-  same container. A ~13x drop is what a working set exceeding memory looks like, so
-  `DATA-004` appears to be doing exactly what it was written for.
-- **The ladder default brackets this range.** A ladder whose steps all sit past collapse
-  locates no inflection point, which is the one thing the ladder exists to find.
-- **Cache hit rate climbs but stays low** (18% → 33%). At `dev` it reached 77% in the first
-  step. Worth watching: it may simply be a cold cache over a far larger key space, or the
-  hot set may be too diffuse at this catalog size even with the skew.
+- **Capacity is somewhere between 100 and 200 rps**, against 2,000+ rps at `dev` scale on the same container. A ~13x drop is what a working set exceeding memory looks like, so `DATA-004` appears to be doing exactly what it was written for.
+- **The ladder default brackets this range.** A ladder whose steps all sit past collapse locates no inflection point, which is the one thing the ladder exists to find.
+- **Cache hit rate climbs but stays low** (18% → 33%). At `dev` it reached 77% in the first step. Worth watching: it may simply be a cold cache over a far larger key space, or the hot set may be too diffuse at this catalog size even with the skew.
 
 ## Open
 
@@ -94,6 +88,7 @@ Known gaps, each with why it is still open rather than closed.
 
 ## Open decisions
 
+- **Where the tier multipliers live.** They are now normative in `SPEC.md` POST /cart/:id/quote (*Resolved unit price*), which closes the ambiguity. The alternative is `rate` rows discriminated by `kind: 'tier'`: the figures would then be dataset-pinned and checksummed, derivable by any implementation from data it already loads, and the duplicated constant in `resources/lib/pricing.js` and `packages/seed/src/vocabulary.ts` — which nothing currently checks for drift — would go away. Costs one dataset regeneration, which the pricing phase balance decision below likely spends anyway.
 - **Facet counting**, when listing pages return. Three candidates identified, none chosen; see [`future-work.md`](future-work.md).
 - **Promotion eligibility lookup** — indexed array probes versus one denormalized key. A P1 measurement, not a guess. See [`data-model.md`](data-model.md).
 - **Dataset distribution via Git LFS or release assets.** LFS today: the org is on Enterprise with ample headroom and near-zero usage, so the current dataset is comfortable. Release assets are unmetered and deletable, which matters if regeneration becomes routine. Revisit if the dataset grows substantially, regeneration becomes frequent, or clone volume climbs.

@@ -1,5 +1,5 @@
 /**
- * Assert that every MUST in SPEC.md is covered by at least one test — SPEC.md §8.
+ * Assert that every MUST in SPEC.md is covered by at least one test — SPEC.md#conformance.
  *
  * Static: scans test titles for the `[REQ-ID ...]` prefix that `covers()` emits, so it runs
  * without a live implementation. Exits non-zero on a gap.
@@ -47,8 +47,6 @@ const active = activeRequirements();
 const musts = active.filter((r) => r.level === 'MUST');
 const gaps = coverageGaps(covered);
 
-console.log(`${active.length} active requirements, ${musts.length} MUST`);
-console.log(`covered by tests: ${covered.size}`);
 
 if (gaps.length) {
 	console.error(`\nFAIL — ${gaps.length} MUST requirement(s) have no test:`);

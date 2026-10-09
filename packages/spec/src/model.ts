@@ -1,5 +1,5 @@
 /**
- * Domain model — SPEC.md §3.
+ * Domain model — SPEC.md#data-model.
  *
  * Stack-neutral. These types describe what crosses the wire, never how anything is stored.
  * If a type here could not be produced by Fastify + Postgres + Redis, it is mis-specified.
@@ -33,7 +33,7 @@ export interface Product {
 	categoryIds: string[];
 	/** Grams. Summed across lines for shipping — QUOTE-006. */
 	weight: number;
-	/** Fan out to further product reads — see the §3 foldings. */
+	/** Fan out to further product reads — see SPEC.md#foldings-and-what-they-cost. */
 	relatedProductIds: string[];
 	reviewRollup: ReviewRollup;
 }
@@ -125,7 +125,7 @@ export interface Quote {
 	currency: string;
 }
 
-/** SPEC.md §5. Varies by tier and region — PDP-002. */
+/** SPEC.md#get-productidtierregion. Varies by tier and region — PDP-002. */
 export interface ProductAggregate {
 	product: Product;
 	variants: Variant[];
