@@ -1,55 +1,48 @@
 # Contributing
 
-This repo follows Harper's [organization contribution guidelines](https://github.com/HarperFast/.github/blob/main/CONTRIBUTING.md) and [Code of Conduct](https://github.com/HarperFast/.github/blob/main/CODE_OF_CONDUCT.md).
+Follow Harper's [contribution guidelines](https://github.com/HarperFast/.github/blob/main/CONTRIBUTING.md) and [Code of Conduct](https://github.com/HarperFast/.github/blob/main/CODE_OF_CONDUCT.md).
 
-This is the reference implementation for the [Harper Application Architecture Benchmarks](https://github.com/HarperFast/application-architecture-benchmarks). That repo's methodology, measurement rules, and rules about how results may be described are **binding here**. Read it before proposing anything that touches the specification, the dataset, or the endpoints.
+The [Application Architecture Benchmarks methodology](https://github.com/HarperFast/application-architecture-benchmarks) governs this repo, including measurement and reporting. Read it before changing the specification, dataset, or endpoints.
 
 ## Before you start
 
-Open an issue, or say hello in [Discord](https://harper.fast/discord), before large changes.
+Check [docs/plan.md](docs/plan.md) for current work and blockers. Open an issue or discuss large changes in [Discord](https://harper.fast/discord).
 
-Some changes are much heavier than their diff suggests, because published benchmark results were produced against them:
+These changes need particular care because they affect comparison validity:
 
-| Change | Why it is heavy |
+| Change | Constraint |
 |---|---|
-| `SPEC.md` | Every implementation on every platform is measured against it. A requirement that changes meaning invalidates comparisons already published. |
-| `dataset/` | The dataset is a pinned contract. Regenerating it changes every number ever produced from it. |
-| `resources/` pricing logic | The promotion evaluation order is normative. Two implementations that disagree on a total produce an invalid comparison, not a close one. |
+| `SPEC.md` | Preserve stack neutrality. Changes in meaning affect every implementation and comparisons using that version. |
+| `dataset/` | The dataset is a pinned contract. Regenerating it changes the basis of every run. |
+| Pricing logic | Preserve the specification's promotion order and totals across implementations. |
+| Dependencies | Read [docs/structure.md](docs/structure.md): workspace dependencies can ship even under `--omit=dev`. |
 
-Expect more discussion and slower merges on those than on a bug fix or a doc correction.
+## Setup
 
-## Prerequisites
-
-This repo uses **Git LFS** for the benchmark dataset. Install it before cloning, or the large files arrive as text pointers rather than data:
+Follow the [local setup](README.md#run-locally). The benchmark dataset requires Git LFS; if you cloned without it, run:
 
 ```bash
 git lfs install
+git lfs pull
 ```
 
-Already cloned without it? `git lfs pull` fixes it in place. The `dev` dataset is plain git and needs none of this.
+The `dev` dataset needs no LFS. Load the committed data for normal work; `npm run seed` is only for intentional dataset changes.
 
-## Before you open a pull request
+## Before opening a pull request
 
 ```bash
 npm run check
-```
-
-That checks, each with a committed negative test, that `SPEC.md` agrees with the requirement registry, that every reference to a section of `SPEC.md` resolves to a heading that exists, that every MUST is covered, that the promotion index returns a superset of the eligible set, that the dataset matches its manifest, that the tree typechecks, and that a simulated deploy lands nothing dev-only on a node.
-
-Then the conformance suite, which is the executable form of the specification:
-
-```bash
 npm run test:e2e
 ```
 
-Every test names the requirement ids it covers. **A new MUST without a test fails CI** — that is the point of the coverage gate, not an inconvenience to route around.
+`check` validates requirement ids and levels, specification links, declared MUST coverage, promotion-index completeness, dataset checksums, types, and deployment dependencies. The conformance suite tests the HTTP behavior; each test names the requirement ids it covers. **A new MUST without a test fails CI.** Declared coverage does not prove every check runs; known gaps are in [the plan](docs/plan.md#open).
 
-## What is especially welcome
+Update `docs/plan.md` when status, decisions, or limitations change.
 
-- **A faster way to satisfy a requirement.** If the Harper implementation is leaving performance on the table, that is a bug in the reference, and the reference exists to be good.
-- **A requirement that cannot be implemented on another stack.** `SPEC.md` is supposed to be stack-neutral; if something in it could not be satisfied by Fastify + Postgres + Redis, it is mis-specified and we want to know.
-- **Evidence that a measurement is unsound.** Instructions for reproducing a flaw are more useful than a report of one.
+## Useful contributions
 
-## What this repo is not
+- Faster implementations that preserve required behavior.
+- Requirements that cannot be satisfied on another stack, such as Fastify + Postgres + Redis.
+- Reproducible evidence of measurement flaws.
 
-It is not where competitor implementations live — those belong in the benchmarks repo. It is not where benchmark results are published — those are dated snapshot repos. See [`docs/plan.md`](docs/plan.md) for how the pieces fit and what state each is in.
+Competitor implementations belong in the benchmarks repo. Published results belong in dated snapshot repos, never here.
