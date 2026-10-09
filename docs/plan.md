@@ -31,8 +31,9 @@ Results are never published from this repo.
 ## Recent work
 
 - **2026-10-09 — Documentation edit:** shortened guides, removed duplicated schema and rationale, and clarified existing measurement and coverage limits. No application, requirement semantics, or dataset changes.
+- **2026-10-09 — Check repair:** the specification anchor checker now skips nested Git repositories and worktrees. Regression tests run with `check:anchors` and verify that broken links in this checkout still fail.
 
-Validation: local links and diff checks pass. `npm run check` hits a pre-existing anchor-check failure in the nested `.claude/worktrees/spec-pricing` checkout. In a clean copy, all stages through typechecking pass; deployment validation remains incomplete because the sandbox blocked npm cache writes. This does not change the last recorded CI status.
+Validation: full `npm run check` passes in this checkout, including deployment simulation, with npm cache write access granted outside the sandbox. Local link and diff checks also pass. This does not change the last recorded CI status.
 
 ## Next
 
