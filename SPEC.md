@@ -1,6 +1,6 @@
 # Ecommerce Store — Application Specification
 
-**Spec version:** `0.2.0-draft` · **Status:** P0 draft · **Last updated:** 2026-10-06
+**Spec version:** `0.2.0-draft` · **Status:** P0 draft · **Last updated:** 2026-10-09 (editorial; requirements unchanged)
 
 Scope, methodology, and the rules governing how results may be described are defined by [Harper Application Architecture Benchmarks](https://github.com/HarperFast/application-architecture-benchmarks). That document is binding. This one defines only the application.
 
@@ -8,23 +8,17 @@ Scope, methodology, and the rules governing how results may be described are def
 
 ## What this document is
 
-The reference specification for the application under benchmark. It exists to be implemented more than once — on Harper, and on assembled stacks — so the implementations can be compared.
+This specification defines the application implemented on Harper and assembled stacks for comparison.
 
-> ### The rule
->
-> **This specification is functional and stack-neutral. Implementations are maximally native to their stack.**
+**Requirements are functional and stack-neutral; implementations use their stack's native mechanisms.** For example, promotion eligibility is a requirement; a particular secondary index is an implementation choice. Record differences in implementation rather than forcing a shared design.
 
-Requirements are stated as endpoints, behaviors, and data contracts. None prescribe a mechanism. "The quote resolves eligible promotions by tier, SKU, and category" is a requirement; "uses a secondary index on `promotion.tier`" is one stack's answer to it.
-
-Where implementations diverge in *how* they satisfy a requirement, that divergence is the finding, and it is recorded rather than smoothed away.
-
-**This is not a description of the Harper implementation.** If a requirement here could not be satisfied by Fastify + Postgres + Redis, it is mis-specified; file it as a defect.
+If a requirement cannot be satisfied by Fastify + Postgres + Redis, report it as a specification defect.
 
 ### Scope
 
-P0 is two endpoints, one background writer, eight tables, and one dataset. Deliberately small. An architectural difference only appears where the architecture does work, and a specification large enough to cover a storefront is a specification nobody finishes implementing on four stacks.
+P0 covers two endpoints, one background writer, eight tables, and one benchmark dataset. The workload exercises dependent reads and pricing without requiring a complete storefront.
 
-Storefront UI, auth, product listing, search, checkout commit, images, and realtime are **future work**. The reasoning behind each, and the decisions already taken on them, are preserved in [`docs/future-work.md`](docs/future-work.md) so they are not rediscovered from scratch.
+Storefront UI, auth, listing, search, checkout commit, images, and realtime are deferred. [Future work](docs/future-work.md) records their scope and decisions.
 
 ## How to read this document
 
@@ -34,7 +28,7 @@ Every requirement has a permanent id, `AREA-NNN`. Withdrawn requirements are str
 - **SHOULD** — expected; a deviation is recorded with a reason.
 - **MAY** — permitted, never required, never measured.
 
-Areas: `DATA` dataset and schema · `QUOTE` cart quote · `PDP` product aggregate · `WRITE` background writes · `OBS` observability.
+Areas: `DATA` dataset and schema · `CACHE` caching · `QUOTE` cart quote · `PDP` product aggregate · `WRITE` background writes · `OBS` observability.
 
 ---
 
@@ -55,15 +49,15 @@ Eight tables. Field names are normative for the API; storage representation is n
 
 ### Foldings, and what they cost
 
-Reaching eight tables required three judgment calls. Each is recorded because each one removes a read from the fan-out, and fan-out depth is the thing being measured.
+Three choices keep the model to eight tables:
 
-1. **Review rollup is a field on `product`**, not its own table. Costs one read from the PDP aggregate. A real system maintains this asynchronously, so a separate table would be more faithful — but the PDP already fans out to variants, inventory and related products, and the rollup adds breadth rather than depth.
-2. **Related items are product ids on `product`**, which still fan out to further `product` reads. Depth preserved.
-3. **Shipping and tax share one `rate` table**, discriminated by kind. They are looked up identically — a keyed read returning a rate — and splitting them would buy a table, not a behaviour.
+1. **Review rollup on `product`:** removes a separate PDP read. Real systems maintain it asynchronously, but that read would add breadth rather than dependency depth.
+2. **Related product ids on `product`:** still require further product reads, preserving depth.
+3. **Shipping and tax in `rate`:** distinguished by kind; separate tables would add no new behavior.
 
 `DATA-001` **MUST** — An implementation uses exactly these eight logical entities **as its source of truth**. A stack MAY represent them differently where its idiom demands (a normalized schema may split embedded line items into their own relation), and MUST then document the mapping. What it MUST NOT do is pre-join or denormalize its *source of truth* into a shape that removes a read the specification requires — that is the measurement, not an optimization.
 
-**Derived caches are permitted and expected**, and are not a violation of the above: a cache holds a copy, not the truth. The distinction is testable — deleting every cache must change no response, only its latency. A separated stack caching the product aggregate in Redis and a collapsed stack caching it in-process are doing the same thing; what differs is the cost of keeping it coherent, which is what [Background writes](#background-writes) exists to measure.
+**Derived caches are permitted and expected.** Deleting them changes latency, not responses. Their coherence cost is measured through [background writes](#background-writes).
 
 ### Caching
 
@@ -73,9 +67,9 @@ Reaching eight tables required three judgment calls. Each is recorded because ea
 
 ### Rate table invariants
 
-The `rate` table is looked up, never searched, so its contents carry a contract. These hold in the dataset and an implementation may rely on them rather than defending against them:
+Implementations may rely on these dataset invariants:
 
-- **Shipping bands within a region are contiguous, non-overlapping, and inclusive at both ends.** `weightMin` and `weightMax` are both inclusive, and the bands of a region cover every non-negative weight — the topmost band is open-ended in effect. There is therefore exactly one matching band for any cart, and **no fallback behaviour is specified because no cart can reach one.** An implementation that finds zero or several matching bands has loaded a dataset that violates this contract and should fail loudly rather than guess.
+- **Shipping bands within a region are contiguous and non-overlapping.** `weightMin` and `weightMax` are inclusive. Bands cover every non-negative weight, with an effectively open-ended top band, so exactly one matches any cart. No fallback is specified; zero or multiple matches indicate invalid data and should fail loudly.
 - **Exactly one tax rate per jurisdiction.**
 
 ### Invariants
@@ -103,20 +97,22 @@ The write-shaped read path, and the primary endpoint under test. Prices a cart.
 - `QUOTE-002` **MUST** — Each line resolves its product and variant. A line naming an unknown sku fails the quote with `400`; it is not silently dropped.
 - `QUOTE-003` **MUST** — Availability per line is resolved against inventory across fulfillment locations in ascending `location.priority`, drawing from each in turn until the line's quantity is satisfied or the region's locations are exhausted.
 
-  **A shortfall does not change what is priced.** The line is priced at its full requested quantity and the unmet amount is reported as `shortfall`. Pricing only the available quantity would make a cart's total a function of live inventory, which the background writer (Background writes) is continuously changing — totals would drift under load for reasons unrelated to the architecture, and `QUOTE-008` determinism would hold only between writes. A quote prices what was asked for and states what cannot be filled.
+  **Price the full requested quantity** and report the unmet amount as `shortfall`. Inventory changes affect fulfillment, not the quantity being priced.
+
 - `QUOTE-004` **MUST** — The customer's tier is **applied** to pricing, by the normative table in *Resolved unit price* below, and their loyalty balance is **read and carried** in the response.
 
-  Carried, not applied, deliberately. Redeeming a balance is arithmetic on a field the quote already fetches in wave 2: no extra read, no extra wave, no cache pressure. It would impose a normative redemption rule — conversion, cap, position in the promotion order, treatment of the tax base — that every implementation must reproduce exactly, in exchange for distinguishing no architecture. Redemption becomes interesting at **checkout**, where it decrements a balance under concurrency: a contended per-customer write. It is recorded as future work there rather than as busywork here.
+  Quote-time redemption adds arithmetic but no reads or cache pressure. Redemption is deferred to [checkout](docs/future-work.md#loyalty-redemption), where it introduces a concurrent balance update.
+
 - `QUOTE-005` **MUST** — Promotions are resolved by tier, SKU, and category — **including promotions unrestricted on any of those dimensions** — and evaluated in application code: **stacking, exclusivity, threshold, and BOGO** rules. Evaluation order is specified (below) so every implementation produces identical totals.
 - `QUOTE-006` **MUST** — Shipping is resolved by the customer's region and the cart's total weight, where total weight is `Σ (variant.weight × quantity)` over the merged lines, against the band contract in Data model. Shipping is **not** discounted and **not** taxed.
 - `QUOTE-007` **MUST** — Tax is resolved by the customer's jurisdiction and applied to the post-discount subtotal.
-- `QUOTE-008` **MUST** — The quote is **deterministic**: the same cart against the same dataset state produces a byte-identical response. This is what makes the endpoint verifiable at all, and it is the ground-truth correctness guard the measurement rules require.
+- `QUOTE-008` **MUST** — The quote is **deterministic**: the same cart against the same dataset state produces a byte-identical response. Determinism enables verification but does not prove correctness; the harness also needs independently computed expected values.
 - `QUOTE-009` **MUST** — An unknown cart id returns `404`.
 - `QUOTE-010` **MUST** — The response itemizes per line: resolved unit price, quantity, applied promotions, line total, and `shortfall` (zero when the line is fully available); and at cart level: subtotal, discount total, shipping, tax, and grand total. `grandTotal` equals `subtotal - discountTotal + shipping + tax`.
 
 ### Resolved unit price
 
-Before any promotion is considered, each line's unit price is `variant.basePrice` adjusted for the customer's tier. The adjustment is **normative** — without it two implementations disagree on every line of every quote, before pricing logic has run at all.
+Before promotions, adjust `variant.basePrice` by the customer's tier using this normative table:
 
 | Tier | Basis points | Effect |
 |---|---|---|
@@ -131,31 +127,30 @@ The product aggregate resolves its price the same way, so a given variant at a g
 
 ### Promotion evaluation order
 
-Normative, because promotion stacking is order-dependent and an unspecified order makes two correct implementations disagree on the total — which the measurement rules classify as non-equivalent semantics, an invalid cell rather than a close one.
+This order is normative because stacking is order-dependent.
 
-> **Each cart-wide promotion (`exclusive`, `threshold`) and each `bogo` promotion applies at most once per cart. Each `stackable` promotion applies at most once per eligible line.** This is the rule that decides most of the rest. Left implicit, a single cart-wide promotion eligible for several lines applies once per line and compounds — a large enough one prices the cart to zero and returns a well-formed, deterministic, entirely wrong 200.
+- **Merge cart lines by SKU before evaluation.** Duplicate entries become one line with their combined quantity.
+- **Apply each cart-wide (`exclusive`, `threshold`) and BOGO promotion at most once per cart.** Each stackable applies at most once per eligible line.
+- **All discounts consume the same per-line remaining amounts.** Allocate cart-wide discounts across eligible lines in proportion to their remaining amounts, using largest remainder with ties on ascending SKU. No discount may take a line or the cart below zero.
 
-> **All discounts draw on one budget: the line's remaining amount.** Cart-wide discounts are allocated across the lines they are eligible for, in proportion to what each still has left, by largest remainder with ties on ascending SKU. Holding a separate cart-level accumulator alongside the per-line ones lets both discount the same money; the cap bounds the result either way, so the double-spend is invisible in the total and shows up only as per-line figures that do not sum to it.
-
-> **Cart lines are merged by SKU before evaluation.** Nothing requires a cart's lines to be distinct, and evaluation state is keyed by SKU. Two entries of one SKU are one line of a larger quantity — which is what a shopper expects, and what keeps per-SKU state consistent with a subtotal summed per line.
-
-Promotions are either **cart-wide** (`exclusive`, `threshold`) or **per-line** (`bogo`, `stackable`). Both kinds draw down the same per-line remaining amounts, by the allocation rule above. No discount may take a line, or the cart, below zero.
+`exclusive` and `threshold` are cart-wide; `bogo` and `stackable` act on lines. Evaluate as follows:
 
 1. Candidate promotions are collected by tier, SKU, and category. **A promotion unrestricted on a dimension (an empty array) is eligible on that dimension**, so a promotion unrestricted on every dimension is eligible for every line — collection must return it.
 2. **Exclusive** — cart-wide, evaluated against the subtotal. The highest-value one wins; if one applies, **no other promotion applies at all**. Attributed to every line it was eligible for.
 3. Otherwise **threshold** — cart-wide, each eligible promotion applied **once**, against the **pre-discount** subtotal, if the subtotal meets its threshold. Attributed to every line it was eligible for.
 4. Then **BOGO** — each eligible promotion applied **once**, to the single lowest-priced qualifying unit among the lines it is eligible for, where a qualifying line has quantity ≥ 2 and a non-zero remaining amount. Ties break on ascending SKU, so the result does not depend on cart line order.
 
-   **The discount is the promotion's own amount applied to that one unit**, not to the line — `amountBasisPoints` of the unit price, or `amountMinor`, by the same rule as every other kind. A `bogo` promotion at 10000 basis points makes that unit free, which is what the name describes and what the dataset's `bogo` rows carry; the magnitude is read from the promotion rather than assumed so that a corpus carrying anything else prices correctly.
+   Apply the promotion's `amountBasisPoints` to that unit price, or its `amountMinor` to that one unit, using the same amount rule as other kinds. Read the amount from the promotion; the dataset's BOGO rows use 10000 basis points for a free unit.
+
 5. Then **stackable** — each eligible promotion applied **once per eligible line**, against that line's **remaining** amount, so successive percentage discounts compound rather than all computing against the gross line total.
-6. **A promotion carrying a non-zero `thresholdMinor` requires that minimum pre-discount subtotal, whatever its kind.** It is not exclusive to the `threshold` kind: a flat `amountMinor` on a stackable needs a floor, or it discounts more than the cart it lands on.
+6. **A promotion carrying a non-zero `thresholdMinor` requires that minimum pre-discount subtotal, whatever its kind.**
 7. Ties at any step break on ascending promotion id.
 8. **At most three stackable promotions apply to any one line**, in ascending promotion id.
 9. **`discountTotal` never exceeds 60% of the subtotal**, floored. The cap is a **running** bound, not a final truncation: each discount is applied against the headroom remaining at the moment it is applied, and one that would cross the cap is applied **partially**, up to that headroom. A promotion reduced to nothing by an exhausted cap is not attributed to any line.
 
-   Truncating at the end instead would leave `appliedPromotionIds` citing promotions whose discount was scaled away afterwards, which `QUOTE-012` forbids, and would make per-line totals disagree with the cart total they sum to.
+   Final truncation could leave promotion attribution and per-line totals inconsistent with the cart total (`QUOTE-012`).
 
-Steps 8 and 9 are normative bounds, not tuning: real stores limit stacking, and without a bound a promotion corpus with enough unrestricted stackables compounds a cart to zero.
+The stacking limit and discount cap are normative bounds.
 
 Rounding: each discount rounds half-up to the minor unit at the point it is applied, not at the end.
 
@@ -180,7 +175,7 @@ The read-heavy leg. Mostly cacheable, but varies by `tier` and `region`.
 
 A steady, low-rate stream of inventory and price updates against the same records the read path touches.
 
-**Not an endpoint under test.** Its own latency is not a headline metric. It exists so that caches have to stay coherent with their source of truth — a read-only workload lets a separated stack's cache fill once and never invalidate, which is not a cache any real store operates.
+The stream exercises cache coherence; its latency is not a headline metric. A read-only workload would let caches fill without paying invalidation costs.
 
 - `WRITE-001` **MUST** — The writer updates `inventory` quantities and `variant` prices against records within the read path's working set, at a configured steady rate, **through the application's write surface**. A write made directly to the datastore updates the source of truth while invalidating nothing, so the cache converges only on expiry and the coherence cost this section exists to measure is never paid. A separated stack's write path has to evict its cache key for the same reason; this is the same work on the other architecture.
 - `WRITE-002` **MUST** — A committed write is observable on the product aggregate (GET /product/:id) within `FRESH_MS`, and in quote pricing (POST /cart/:id/quote) within `FRESH_MS`.
@@ -189,11 +184,11 @@ A steady, low-rate stream of inventory and price updates against the same record
 
 ### `FRESH_MS`
 
-The coherence budget: how stale a read may be after a write commits. It is a property of the benchmark rather than of any stack, so it is set once, applied to every target, and recorded with the results.
+The maximum staleness after a write commits, set once for all targets and recorded with results.
 
-**Provisionally 1000 ms**, pending the first comparison. The figure is now meaningful rather than arbitrary because there is a mechanism behind it: a write invalidates synchronously before it returns, so a read issued after a completed write is already fresh on a single node. The budget exists for the window that concurrency and replication open, not for the happy path. An implementation that meets it only by expiry rather than invalidation must say so (`CACHE-002`).
+**Provisionally 1000 ms**, pending the first comparison. Synchronous invalidation can make reads after a completed write fresh on one node; the budget allows for concurrency and replication. Implementations relying on expiry must declare it (`CACHE-002`).
 
-Setting it too tight makes the benchmark a cache-invalidation test; too loose and a stack can serve arbitrarily stale data for free.
+Too tight a budget makes the workload primarily an invalidation test; too loose a budget permits unrepresentative staleness.
 
 ---
 
@@ -209,7 +204,7 @@ Setting it too tight makes the benchmark a cache-invalidation test; too loose an
 
 An implementation publishes a conformance report: every requirement id, and pass / fail / deviation-with-reason.
 
-The shared verification suite is the executable form of this document. Each test names the requirement ids it covers, and every MUST is covered by at least one test — enforced by `npm run check`, not asserted.
+The shared verification suite implements this document. Each test names the requirement ids it covers. `npm run check` enforces declared coverage for every MUST; it does not guarantee execution of every check. Known execution and assertion gaps are tracked in [the plan](docs/plan.md#open).
 
 Passing conformance is **necessary but not sufficient**. An implementation must also use its stack well; that is a review judgment, and the benchmarks repo defines how it is made.
 
@@ -225,4 +220,4 @@ P0 does not complete until this document passes: self-review → cross-model rev
 | Cross-model review | ☑ 2026-10-01 — two rounds, Claude + codex (agy timed out both rounds) |
 | Human review | ☐ |
 
-**Known open:** `FRESH_MS` (Background writes), the eight-table foldings (Data model), and the promotion evaluation order (POST /cart/:id/quote) — the last because it is invented here rather than derived from a real system, and it determines whether two correct implementations agree on a total.
+**Known open:** the provisional `FRESH_MS` budget, the eight-table foldings, and review of the invented promotion order by someone with pricing-engine experience.

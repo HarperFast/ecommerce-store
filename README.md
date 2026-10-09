@@ -1,110 +1,73 @@
 # Harper Ecommerce Store
 
-A Harper-native ecommerce catalog service, and the reference implementation for the [Harper Application Architecture Benchmarks](https://github.com/HarperFast/application-architecture-benchmarks).
+A Harper-native catalog service and reference implementation for the [Harper Application Architecture Benchmarks](https://github.com/HarperFast/application-architecture-benchmarks). This repo contains the application, its stack-neutral specification, and the conformance suite used by every implementation.
 
-It exists to be three things at once: a worked example of how to build an efficient Harper application, the home of the specification every benchmark implementation is measured against, and a target that is tested and benchmarked against each significant Harper release.
-
-> **Status: pre-release.** The specification has not passed its human review gate, and no run this repo has produced is a result. See [`docs/plan.md`](docs/plan.md) for what state each piece is in and what may not yet be claimed.
+> **Pre-release.** The specification has not passed its review gate, and no run is a publishable result. See [project status and open work](docs/plan.md).
 
 ## The application
 
-A catalog service for a large, variant-heavy store: 2 million products across 6.5 million purchasable SKUs, stocked across eight fulfillment locations.
+The benchmark catalog has 2 million products, 6.5 million purchasable SKUs, and eight fulfillment locations. Two endpoints exercise its read paths:
 
-Two endpoints.
+| Endpoint | Behavior | Caching |
+|---|---|---|
+| `POST /cart/:id/quote` | Reads the cart, products, variants, inventory, customer, promotions, shipping, and tax in roughly four to five dependent waves (60–150 reads). | Entity caches are allowed; response caching is forbidden. |
+| `GET /product/:id?tier=&region=` | Returns the product, variants, inventory, resolved price, review rollup, and related items. | Cache keys include tier and region. |
 
-### `POST /cart/:id/quote`
+Background inventory and price writes target the same records, exercising cache coherence. Their latency is not a headline metric.
 
-Prices a cart. Resolves in four to five dependent waves — 60 to 150 record reads — because each wave needs the previous wave's answer before it can issue its own:
+Eight logical entities are the source of truth: `cart`, `customer`, `product`, `variant`, `inventory`, `location`, `promotion`, and `rate`. Money uses integer minor units. [SPEC.md](SPEC.md) defines pricing and promotion order; [the data-model notes](docs/data-model.md) explain Harper's implementation.
 
-1. The cart.
-2. Product and variant for every line.
-3. Inventory across fulfillment locations, honouring location priority; and the customer's tier and loyalty balance.
-4. Eligible promotions by tier, SKU and category, then real pricing logic over them — stacking, exclusivity, thresholds, BOGO.
-5. Shipping by region and total cart weight; tax by jurisdiction.
+## Run locally
 
-Every response is unique to its cart, so it is **never response-cacheable**. Entity caches still do the job real deployments give them.
-
-Promotions evaluate in a fixed order — exclusive, then threshold, then BOGO, then stackable, ties breaking on ascending promotion id, each discount rounding half-up as it is applied. The order is normative: without it two correct implementations disagree on a total.
-
-### `GET /product/:id?tier=&region=`
-
-The product aggregate: the product, its variants, live inventory for those variants, resolved price, review rollup, and related items. Mostly cacheable, but **price varies by tier and availability by region**, so both belong in any cache key.
-
-### Background writes
-
-A steady stream of inventory and price updates against the same records the reads touch. Not an endpoint, and not under test — it exists so caches have to stay coherent with their source of truth, which a read-only workload would never force.
-
-## Data model
-
-Eight tables, deliberately not pre-joined: `cart`, `customer`, `product`, `variant`, `inventory`, `location`, `promotion`, `rate`.
-
-Money is integer minor units end to end — no float ever enters a total. Product-level values are resolved on read rather than materialized on write, because the fan-out is the thing being measured. [`docs/data-model.md`](docs/data-model.md) has the reasoning, including what would reverse it.
-
-## Running it
-
-Requires [Git LFS](https://git-lfs.com) — the benchmark dataset lives there. `dev` does not.
+Requires Node `>=22`. Install [Git LFS](https://git-lfs.com) to use the benchmark dataset; the development dataset is stored in plain git.
 
 ```bash
-git lfs install && npm install
-```
-
-Start Harper with the small development dataset:
-
-```bash
+git lfs install
+npm install
 npm run dev
 ```
 
+In another terminal, load the committed development dataset and request a quote:
+
 ```bash
 node scripts/load-dataset.mjs --scale dev
-```
-
-The dataset is committed, so there is nothing to generate. `npm run seed` regenerates it in place and is for changing the dataset, not for setting up — see [`CONTRIBUTING.md`](CONTRIBUTING.md) before reaching for it.
-
-```bash
 curl -s -X POST localhost:9926/cart/cart-000042/quote -H 'content-type: application/json' -d '{}'
 ```
 
+**Do not run `npm run seed` for setup.** It regenerates the pinned dataset. Read [Contributing](CONTRIBUTING.md) before changing it.
+
 ## Datasets
 
-| | Stored | Use |
+| Scale | Storage | Use |
 |---|---|---|
-| `dev` | plain git | Local work. Loads in seconds. **Never a benchmark target** — it fits entirely in memory, the one thing the benchmark data must not do. |
-| `bench` | Git LFS | The benchmark. Expands to several times the target container's memory budget. |
+| `dev` | Plain git | Local development and CI. Fits in memory; never a benchmark target. |
+| `bench` | Git LFS, compressed | Benchmarking. Designed to exceed the target container's memory budget. |
 
-Row counts and checksums are in each dataset's `MANIFEST.json`, which is the contract; they are not restated here, because a second copy is only a second thing to be wrong.
+Each dataset's `MANIFEST.json` defines its row counts and checksums. Every implementation loads the committed artifact and verifies its checksum; see [dataset generation](docs/seed-design.md).
 
-Both are generated once, committed, and verified by checksum before every load. Implementations do not re-derive them — identity is established by hash, not by every runtime reproducing one PRNG stream. [`docs/seed-design.md`](docs/seed-design.md).
-
-## Conformance
-
-[`SPEC.md`](SPEC.md) states the numbered, stack-neutral requirements. [`packages/spec`](packages/spec) is its machine-readable half; [`e2e/`](e2e) is its executable half, where every test names the requirement ids it covers.
+## Validate and benchmark
 
 ```bash
-npm run check && npm run test:e2e
+npm run check
+npm run test:e2e
 ```
 
-If a requirement in `SPEC.md` could not be satisfied by Fastify + Postgres + Redis, it is mis-specified — please say so.
+[SPEC.md](SPEC.md) defines the requirements, [packages/spec](packages/spec) holds the contract and registry, and [e2e](e2e) tests conformance. Requirements must be implementable on other stacks, including Fastify + Postgres + Redis.
 
-## Benchmarking
-
-Containerized, with a fixed resource budget and the load generator outside it: [`containers/README.md`](containers/README.md). The harness and, just as importantly, the claims it does **not** support: [`bench/README.md`](bench/README.md).
+Use the [container workflow](containers/README.md) for benchmark runs. Read the [harness limitations](bench/README.md#limitations) before interpreting any output.
 
 ## Documentation
 
-| | |
+| Document | Purpose |
 |---|---|
-| [`SPEC.md`](SPEC.md) | The specification |
-| [`docs/data-model.md`](docs/data-model.md) | The eight tables and why aggregates resolve on read |
-| [`docs/seed-design.md`](docs/seed-design.md) | Deterministic datasets, and why they are committed |
-| [`docs/structure.md`](docs/structure.md) | Repository layout. Read before adding a dependency |
-| [`docs/future-work.md`](docs/future-work.md) | What is out of scope, and the decisions behind it |
-| [`docs/plan.md`](docs/plan.md) | Development status, open decisions, what may not yet be claimed |
-| [`CONTRIBUTING.md`](CONTRIBUTING.md) | How to propose changes |
+| [Specification](SPEC.md) | Stack-neutral requirements and review gate |
+| [Project plan](docs/plan.md) | Status, priorities, blockers, and dated observations |
+| [Data model](docs/data-model.md) | Harper schema and indexing decisions |
+| [Dataset generation](docs/seed-design.md) | Reproducibility and distribution rules |
+| [Repository structure](docs/structure.md) | Deployment layout and dependency rules |
+| [Future work](docs/future-work.md) | Deferred scope and decisions |
+| [Contributing](CONTRIBUTING.md) | Change and validation workflow |
 
-## Versions
+## Versions and license
 
-harper `5.2.12` · Node `>=22` · TypeScript `7.0.2`
-
-## License
-
-[Apache 2.0](LICENSE)
+Harper `5.2.12` · Node `>=22` · TypeScript `7.0.2` · [Apache 2.0](LICENSE)
