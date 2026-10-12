@@ -28,7 +28,7 @@ The header of [run-benchmark.sh](run-benchmark.sh) lists every setting. The ones
 | `SKIP_LOAD=1` | Restore the existing snapshot instead of seeding. The snapshot's provenance must match. |
 | `COMPOSE_EXTRA` | Extra compose files layered over `compose.yaml`. `compose.tier2.yaml` places the target and generator in the tier-2 host's slices. |
 | `TIER` | Recorded with the run; tier 1 records that the clock is neither pinned nor measured. |
-| `PRE_START_HOOK` | Host command run between stopping the target and its measured start. Tier 2 drops the page cache here. |
+| `PRE_START_HOOK` | Host command run between stopping the target and its measured start. Tier 2 drops the page cache here; on tier-1 Podman the VM's cache is dropped with `podman machine ssh 'sync; echo 3 \| sudo tee /proc/sys/vm/drop_caches'`, which also cools every other container on the machine. |
 | `DATASET_ROOT`, `SNAPSHOT_DIR` | Where expanded datasets and snapshots live, so a worktree can use another checkout's. |
 | `KEEP_TARGET=1` | Leave the target running afterwards; by default it is stopped. |
 
@@ -47,8 +47,9 @@ These choices affect measurements and must match across targets:
 
 - **Bridge networking.** Mixing host and bridge networking would invalidate a comparison.
 - **Plain HTTP on both ports.** TLS termination is excluded.
+- **No response compression.** Harper compresses only for clients that accept brotli, with `http.compressionThreshold` set, and neither holds here. A competing stack must not compress either.
 - **Named volume on a real filesystem.** Never tmpfs.
-- **Pinned Harper version**, installed globally and checked at build time, with msgpackr's native decoder verified loaded. Its linux-arm64 prebuilt ships only musl binaries, so the image compiles it; a target running without it measures a slower Harper than ships on x86-64.
+- **Pinned Harper version**, installed globally and checked at build time, with msgpackr's native decoder verified loaded. Its linux-arm64 prebuilt ships only musl binaries, so the image compiles it; without it, an arm64 target runs a slower Harper than an x86-64 one.
 - **No healthcheck in any target container.** A healthcheck runs its probe inside the target's budget for the whole run. Readiness is probed from the host.
 - **Production dependency install:** `npm install --force --omit=dev --ignore-scripts`, matching Harper's deployment path.
 
@@ -59,15 +60,15 @@ These choices affect measurements and must match across targets:
 3. **Cold start:** stop the target, run `PRE_START_HOOK`, start it, and record the time to the first successful (2xx) response. The probe polls the published port from the host every 25 ms ([wait-ready.mjs](wait-ready.mjs)).
 4. **Warm-up:** drive a fixed workload, identical across targets.
 5. **Measure:** run the load ladder.
-6. **Verify:** check the run record with [verify-run-record.mjs](../scripts/verify-run-record.mjs). A failing trial is reported and its record kept; re-run it.
+6. **Verify:** check the run record with [verify-run-record.mjs](../scripts/verify-run-record.mjs). A failing trial, or one whose generator failed, is reported and its record kept; re-run it.
 
-Restore the snapshot between trials so earlier writes do not alter later trials' starting state. Cold, warm, and hot phases are recorded separately. A successful readiness response is not a correctness check.
+Every trial, the first included, starts by restoring the snapshot, so earlier writes do not alter later trials' starting state and trial 1 is not the odd one out. Cold, warm, and hot phases are recorded separately; the cold start also records how much of it the compose CLI took. A successful readiness response is not a correctness check. The target is stopped with a 120 s grace, and a snapshot is refused if it did not exit cleanly.
 
-Snapshots are named `<scale>-harper-<version>.tar.gz`. The provenance record names the dataset manifest hash, schema hash, Harper version, image, and architecture, and a restore refuses a snapshot whose scale, dataset, schema, version, or architecture differs from the run's. An existing snapshot without a record is refused unless `ALLOW_UNVERIFIED_SNAPSHOT=1`.
+Snapshots are named `<scale>-harper-<version>.tar.gz`. The provenance record names the dataset manifest hash, schema hash (comments excluded), Harper version, image, and architecture, and a restore refuses a snapshot whose scale, dataset, schema, version, or architecture differs from the run's, or is unknown. An existing snapshot without a record is refused unless `ALLOW_UNVERIFIED_SNAPSHOT=1`.
 
 ## Accounting
 
-The generator reads the target's CPU per step from cgroup v2 `cpu.stat`, through a read-only mount of the host's cgroup tree: the target container's scope by default, or the cgroups in `TARGET_CGROUPS` (a separated stack's containers, or a tier-2 slice). Each step records its wall-clock start, offer end, and drain end, so host-side samples such as tier 2's per-cgroup cycle counts can be joined to it. The orchestrator passes the conditions the generator cannot see — Harper version, image, budget, compose files, tier, snapshot provenance, cold start, and other containers running on the machine — and they are recorded under `conditions.orchestrator`.
+The generator reads the target's CPU per step from cgroup v2 `cpu.stat`, through a read-only mount of the host's cgroup tree: the target container's scope by default, or the cgroups in `TARGET_CGROUPS` (a separated stack's containers, or a tier-2 slice). Each step records its wall-clock start, offer end, and drain end, so host-side samples such as tier 2's per-cgroup cycle counts can be joined to it. The orchestrator passes the conditions the generator cannot see — Harper version, image and base-image digests, budget requested and applied, compose files, tier, snapshot provenance, cold start, and other containers running on the machine — and they are recorded under `conditions.orchestrator`.
 
 Output is stored in the `bench-results` volume at `/results`.
 
@@ -81,6 +82,6 @@ docker compose -f containers/compose.yaml build harper
 
 ## Host limitations
 
-The CPU clock is not pinned, so these runs cannot support cycle-normalized efficiency claims. Harper's CPU accounting is a single total; there is no framework/database/cache breakdown yet.
+The CPU clock is not pinned, so these runs cannot support cycle-normalized efficiency claims. Target CPU is per container; Harper is one container, so it has no framework/database/cache breakdown, while an assembled stack gets one figure per container.
 
 On macOS, Podman runs in a VM. Resource limits apply within its allocation, and the VM adds a network boundary. Valid controlled comparisons need a Linux host and the remaining [measurement gaps](../bench/README.md#limitations) closed.
