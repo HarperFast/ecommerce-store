@@ -33,7 +33,8 @@ function discountCeiling(subtotal) {
 }
 
 export function resolveUnitPrice(basePrice, tier) {
-	const bp = TIER_BASIS_POINTS[tier] ?? TIER_BASIS_POINTS.standard;
+	// Own keys only: `TIER_BASIS_POINTS['constructor']` is a function, and NaN is not money.
+	const bp = Object.hasOwn(TIER_BASIS_POINTS, tier) ? TIER_BASIS_POINTS[tier] : TIER_BASIS_POINTS.standard;
 	return applyBasisPoints(basePrice, bp);
 }
 
@@ -159,12 +160,16 @@ export function evaluatePromotions({ lines: inputLines, candidates, subtotal }) 
 		const pool = eligible.reduce((sum, sku) => sum + remaining.get(sku), 0);
 		const budget = Math.min(amount, pool, headroom());
 		if (budget <= 0) return [];
+		// Integer quotient and remainder. A floating-point fraction let remainders that are equal
+		// differ by an ulp, so the ascending-SKU tie-break was decided by rounding noise and an
+		// implementation using exact remainders allocated differently.
 		const shares = eligible.map((sku) => {
-			const exact = (remaining.get(sku) * budget) / pool;
-			return { sku, whole: Math.floor(exact), frac: exact - Math.floor(exact) };
+			const scaled = remaining.get(sku) * budget;
+			const rem = scaled % pool;
+			return { sku, whole: (scaled - rem) / pool, rem };
 		});
 		let allocated = shares.reduce((sum, s) => sum + s.whole, 0);
-		for (const share of [...shares].sort((a, b) => b.frac - a.frac || (a.sku < b.sku ? -1 : 1))) {
+		for (const share of [...shares].sort((a, b) => b.rem - a.rem || (a.sku < b.sku ? -1 : 1))) {
 			if (allocated >= budget) break;
 			if (share.whole + 1 > remaining.get(share.sku)) continue;
 			share.whole++;
@@ -217,6 +222,7 @@ export function evaluatePromotions({ lines: inputLines, candidates, subtotal }) 
 	// 3. BOGO — the single lowest-priced qualifying unit, once per promotion. Ties on the
 	//    lower sku, so the choice does not depend on cart line order.
 	for (const entry of of('bogo')) {
+		if (!meetsThreshold(entry.promotion, subtotal)) continue;
 		const line = entry.skus
 			.map((sku) => lineFor.get(sku))
 			.filter((l) => l && l.quantity >= 2 && (remaining.get(l.sku) ?? 0) > 0)
@@ -252,20 +258,32 @@ export function evaluatePromotions({ lines: inputLines, candidates, subtotal }) 
 	return { discountTotal: spent(), perLine };
 }
 
+/**
+ * Exactly one rate must match (SPEC.md#rate-table-invariants). Zero or several mean the data is
+ * invalid, and a quote priced with shipping or tax silently at 0 — or at whichever band sorted
+ * first — is a 200 nobody can tell is wrong.
+ */
+function onlyMatch(rates, matches, what) {
+	const found = rates.filter(matches);
+	if (found.length !== 1) {
+		const error = new Error(`${found.length} ${what} rates match; the rate table requires exactly one`);
+		error.statusCode = 500;
+		throw error;
+	}
+	return found[0];
+}
+
 /** Shipping: the band whose weight range contains the cart's total weight, for the region. */
 export function resolveShipping(rates, region, totalWeight) {
-	for (const rate of rates) {
-		if (rate.kind !== 'shipping' || rate.region !== region) continue;
-		if (totalWeight >= rate.weightMin && totalWeight <= rate.weightMax) return rate.amountMinor;
-	}
-	return 0;
+	return onlyMatch(
+		rates,
+		(rate) => rate.kind === 'shipping' && rate.region === region && totalWeight >= rate.weightMin && totalWeight <= rate.weightMax,
+		`shipping (${region}, ${totalWeight})`
+	).amountMinor;
 }
 
 /** Tax: basis points for the jurisdiction, applied to the POST-discount subtotal (QUOTE-007). */
 export function resolveTax(rates, jurisdiction, taxableAmount) {
-	for (const rate of rates) {
-		if (rate.kind !== 'tax' || rate.jurisdiction !== jurisdiction) continue;
-		return applyBasisPoints(taxableAmount, rate.basisPoints);
-	}
-	return 0;
+	const rate = onlyMatch(rates, (r) => r.kind === 'tax' && r.jurisdiction === jurisdiction, `tax (${jurisdiction})`);
+	return applyBasisPoints(taxableAmount, rate.basisPoints);
 }
