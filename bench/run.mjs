@@ -235,7 +235,12 @@ async function step({ rate, seconds, nextRequest, nextWrite, writeRate, label })
 	const deadline = startedAt + seconds * 1000;
 	while (performance.now() < deadline) {
 		const elapsed = performance.now() - startedAt;
-		const dueRequests = Math.min(totalRequests, Math.floor(elapsed / requestInterval));
+		// Arrival k is scheduled at k * interval, so k + 1 arrivals are due once that time has
+		// passed. Counting floor(elapsed / interval) dispatched every arrival one full interval
+		// after the time it is measured from — 40 ms of phantom latency on every request at
+		// 25 rps, 5 ms at 200, shrinking as the rate rises, which read as a target that got
+		// faster under load.
+		const dueRequests = Math.min(totalRequests, Math.floor(elapsed / requestInterval) + 1);
 		while (issued < dueRequests) {
 			if (inFlight.size >= MAX_IN_FLIGHT) {
 				// Count every arrival we could not offer, then jump the cursor so the backlog
@@ -248,7 +253,7 @@ async function step({ rate, seconds, nextRequest, nextWrite, writeRate, label })
 			issued++;
 		}
 		if (writeRate > 0) {
-			const dueWrites = Math.min(totalWrites, Math.floor(elapsed / writeInterval));
+			const dueWrites = Math.min(totalWrites, Math.floor(elapsed / writeInterval) + 1);
 			while (writesIssued < dueWrites) {
 				// Writes share the ceiling but must not monopolize it: without this check a
 				// stalled operations API filled every slot, reads were shed 100%, and the
