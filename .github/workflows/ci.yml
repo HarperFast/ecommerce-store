@@ -132,6 +132,12 @@ jobs:
           BASE_URL: http://localhost:9926
         run: npm run test --prefix e2e
 
+      # Readers racing writers on a few hot products. The suite above proves a write becomes
+      # visible when nothing else is happening; a lost invalidation needs concurrency to
+      # appear. Last, because it mutates prices.
+      - name: Cache coherence under concurrency
+        run: node scripts/verify-coherence.mjs --url http://localhost:9926 --seconds 10
+
       - name: Harper log
         if: failure()
         run: tail -100 "${{ runner.temp }}/harper.log" || true

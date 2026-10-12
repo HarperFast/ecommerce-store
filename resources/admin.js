@@ -12,7 +12,7 @@
  *
  * Not an endpoint under test: its own latency is not a headline metric (SPEC.md#background-writes).
  */
-import { Resource } from 'harper';
+import { Resource, getContext } from 'harper';
 import { REGIONS, TIERS, viewKey } from './product.js';
 
 const { Variant, Inventory, Location, ProductView } = tables;
@@ -42,6 +42,20 @@ function loadLocationRegions() {
  * game here, and a cache keyed less precisely would have to drop all 16 either way.
  */
 async function invalidateViews(productId, region) {
+	// Commit the source-of-truth write FIRST, then invalidate in the next transaction.
+	//
+	// Harper orders writes to a key by transaction timestamp, and a transaction is stamped when
+	// it starts, not when it commits. Staged in the write's own transaction, the invalidation
+	// carried the write's START time. A view fill that began after that start but read before
+	// the commit assembled the old price, was stamped later than the invalidation, and so won:
+	// either the invalidation was discarded as older than the cached entry, or the fill
+	// replaced the invalidation marker. The stale view then survived until expiry (120 s)
+	// against a 1 s FRESH_MS — scripts/verify-coherence.mjs reproduced it.
+	//
+	// Invalidating after the commit stamps the invalidation after every snapshot that could
+	// have read the old row, and a fill stamped before it is discarded instead of cached. A
+	// separated stack's cache-aside write has the same shape: commit to Postgres, then evict.
+	await getContext().transaction.commit();
 	const regions = region ? [region] : REGIONS;
 	const keys = [];
 	for (const r of regions) for (const tier of TIERS) keys.push(viewKey(productId, tier, r));
