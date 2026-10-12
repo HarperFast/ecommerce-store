@@ -9,17 +9,22 @@
  * at half of FRESH_MS bounds it, for a re-read of a few dozen rows twice a second per worker.
  *
  * The memo holds the PROMISE of a load, so requests arriving while it runs share it rather
- * than each scanning; a failed load is dropped so the next request retries.
+ * than each scanning; a failed load is dropped so the next request retries. The load runs in a
+ * transaction of its own: a shared value must not be read through whichever request's
+ * transaction happened to start it. Age is measured on the monotonic clock, so a wall-clock
+ * step cannot freeze the memo.
  */
+import { transaction } from 'harper';
+
 const LOOKUP_TTL_MS = 500;
 
 export function lookupTable(load) {
 	let current = null;
 	return function get() {
-		const now = Date.now();
+		const now = performance.now();
 		if (!current || now - current.loadedAt > LOOKUP_TTL_MS) {
 			const entry = { loadedAt: now, value: null };
-			entry.value = load().catch((error) => {
+			entry.value = transaction({}, () => load()).catch((error) => {
 				if (current === entry) current = null;
 				throw error;
 			});

@@ -45,8 +45,14 @@ const loadLocations = lookupTable(async () => {
  * Reads and computation are separated so the request that ran the assembly can report both
  * phases (OBS-001): every read is issued and awaited first, then the view is computed from
  * what was read.
+ *
+ * Every read names the fill's own context. Harper 5.3.2 queues fills that arrive in one event
+ * turn and runs the queued ones from a setImmediate chain carrying the FIRST fill's async
+ * context (server/throttle.ts), so an ambient read inside a queued fill joined another fill's
+ * transaction and read its older snapshot — a view assembled from before a write it is
+ * stamped after, which no invalidation would ever remove.
  */
-async function assemble(productId, tier, region) {
+async function assemble(productId, tier, region, context) {
 	const started = process.hrtime.bigint();
 	let dataNs = 0n;
 	const timed = async (read) => {
@@ -58,12 +64,12 @@ async function assemble(productId, tier, region) {
 		}
 	};
 
-	const row = await timed(() => Product.get(productId));
+	const row = await timed(() => Product.get(productId, context));
 	if (!row) return null;
 
 	const [locations, variants] = await timed(async () => {
 		const found = [];
-		for await (const variant of Variant.search({ conditions: [{ attribute: 'productId', value: productId }] })) {
+		for await (const variant of Variant.search({ conditions: [{ attribute: 'productId', value: productId }] }, context)) {
 			found.push(variant);
 		}
 		return [await loadLocations(), found];
@@ -78,8 +84,8 @@ async function assemble(productId, tier, region) {
 	// depend on inventory, and awaiting inventory first serialized two independent waves.
 	const [inventory, related] = await timed(() =>
 		Promise.all([
-			Promise.all(variants.map((variant) => Promise.all(locationIds.map((id) => Inventory.get(`${variant.sku}:${id}`))))),
-			Promise.all((row.relatedProductIds ?? []).map((id) => Product.get(id))),
+			Promise.all(variants.map((variant) => Promise.all(locationIds.map((id) => Inventory.get(`${variant.sku}:${id}`, context))))),
+			Promise.all((row.relatedProductIds ?? []).map((id) => Product.get(id, context))),
 		])
 	);
 
@@ -115,7 +121,7 @@ async function assemble(productId, tier, region) {
 ProductView.sourcedFrom({
 	async get(id, sourceContext) {
 		const [productId, tier, region] = String(id).split(':');
-		const assembled = await assemble(productId, tier, region);
+		const assembled = await assemble(productId, tier, region, sourceContext);
 		if (!assembled) return null;
 		// The request whose miss ran this fill reports its compute phase. The fill runs in its
 		// own context; `requestContext` is the request that triggered it.
@@ -141,8 +147,17 @@ export class product extends Resource {
 	async get(target) {
 		const context = this.getContext();
 		const started = process.hrtime.bigint();
-		const tier = target.get('tier') ?? 'standard';
+		// The cache key may only carry values the write surface invalidates. A tier outside the
+		// normative table resolves as `standard` (SPEC.md#resolved-unit-price), so it shares that
+		// key; an unknown region is refused. Keyed on the raw strings, `?tier=foo` minted a view
+		// no write would ever invalidate, and any client could mint unbounded cache rows.
+		const tier = TIERS.includes(target.get('tier')) ? target.get('tier') : 'standard';
 		const region = target.get('region') ?? 'us-east';
+		if (!REGIONS.includes(region)) {
+			const error = new Error(`unknown region: ${region}`);
+			error.statusCode = 400;
+			throw error;
+		}
 
 		const view = new RequestTarget();
 		view.id = viewKey(target.id, tier, region);
