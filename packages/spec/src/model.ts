@@ -104,6 +104,8 @@ export interface QuoteLine {
 	unitPrice: Minor;
 	appliedPromotionIds: string[];
 	lineTotal: Minor;
+	/** Requested quantity the region's inventory could not cover. The full quantity is still priced — QUOTE-003. */
+	shortfall: number;
 }
 
 /** SPEC.md QUOTE-010. Deterministic for a given cart and dataset state — QUOTE-008. */
