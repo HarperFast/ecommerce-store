@@ -25,17 +25,25 @@ import { REGION_WEIGHTS, TIER_WEIGHTS, skewedIndex, weightedPick } from '@ecomme
  * dataset would remove even that; tracked in docs/plan.md.
  */
 export async function sampleIds(datasetDir, table, field, limit, totalRows) {
-	const stride = totalRows && totalRows > limit ? Math.floor(totalRows / limit) : 1;
+	// The k-th sample is row floor(k * totalRows / limit), so the samples span the whole table.
+	// An integer stride of floor(totalRows / limit) filled `limit` samples before the table
+	// ended and left the tail unreachable: 37% of `dev` inventory (31,802 rows, stride 1), and
+	// the last 10,143 variants and 1,273 inventory rows at `bench`.
+	const take = totalRows && totalRows > limit ? limit : Infinity;
 	const ids = [];
 	const stream = createInterface({
 		input: createReadStream(join(datasetDir, `${table}.ndjson`)),
 		crlfDelay: Infinity,
 	});
 	let index = 0;
+	let next = 0;
 	for await (const line of stream) {
 		if (!line) continue;
-		if (index++ % stride === 0) ids.push(JSON.parse(line)[field]);
-		if (ids.length >= limit) break;
+		if (index++ === next) {
+			ids.push(JSON.parse(line)[field]);
+			if (ids.length >= take) break;
+			next = take === Infinity ? index : Math.floor((ids.length * totalRows) / limit);
+		}
 	}
 	stream.close();
 	return ids;
