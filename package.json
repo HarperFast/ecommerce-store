@@ -9,7 +9,7 @@
     "packages/*"
   ],
   "engines": {
-    "node": ">=22"
+    "node": "^22.18.0 || >=24.0.0"
   },
   "scripts": {
     "dev": "harper dev .",
@@ -30,7 +30,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "harper": "5.2.12",
+    "harper": "5.3.2",
     "typescript": "7.0.2",
     "@ecommerce-store/seed": "*"
   }

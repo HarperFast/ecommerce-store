@@ -103,7 +103,7 @@ jobs:
           HDB_ADMIN_USERNAME: ci
           # Plain HTTP: outside dev mode Harper defaults to HTTPS, and TLS has nothing to do
           # with what the conformance suite asserts.
-          HARPER_SET_CONFIG: '{"threads":2,"logging":{"level":"warn"},"http":{"port":9926,"securePort":null},"operationsApi":{"network":{"port":9925,"securePort":null}}}'
+          HARPER_SET_CONFIG: '{"threads":{"count":2},"logging":{"level":"warn"},"http":{"port":9926,"securePort":null},"operationsApi":{"network":{"port":9925,"securePort":null}}}'
         run: |
           mkdir -p "$HOME"
           HDB_ADMIN_PASSWORD=$(node -e "console.log(require('node:crypto').randomBytes(18).toString('base64url'))")

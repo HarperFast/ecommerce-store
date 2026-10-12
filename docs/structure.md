@@ -1,6 +1,6 @@
 # Repository structure
 
-**Decision:** plain npm workspaces, with the Harper component at the repo root. Verified against Harper `5.2.12`.
+**Decision:** plain npm workspaces, with the Harper component at the repo root. Verified against Harper `5.3.2`.
 
 ## Deployment layout
 
@@ -31,7 +31,7 @@ Plain workspaces avoid a vendoring or bundling step. The verified deployment seq
 |---|---|
 | Pack | `npm pack --json --ignore-scripts <clone>` includes the workspace directories. |
 | Extract | Unpack into `components/<project>`, removing the archive's wrapper directory. |
-| Install | `npm install --force --omit=dev --no-audit --no-fund` at the component root links the workspaces. |
+| Install | `npm install --force --omit=dev --no-audit --no-fund --ignore-scripts` at the component root links the workspaces. Install scripts run only when a deploy sets `allowInstallScripts`. |
 | Run | Imports from `@ecommerce-store/spec` resolve through those links. |
 
 On POSIX, workspace links are relative and survive the staging-to-live rename. Harper adds `--install-links` only for Windows candidate builds.

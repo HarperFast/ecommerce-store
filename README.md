@@ -19,7 +19,7 @@ Eight logical entities are the source of truth: `cart`, `customer`, `product`, `
 
 ## Run locally
 
-Requires Node `>=22`. Install [Git LFS](https://git-lfs.com) to use the benchmark dataset; the development dataset is stored in plain git.
+Requires Node `^22.18.0 || >=24`, the range Harper 5.3 supports. Install [Git LFS](https://git-lfs.com) to use the benchmark dataset; the development dataset is stored in plain git.
 
 ```bash
 git lfs install
@@ -70,4 +70,4 @@ Use the [container workflow](containers/README.md) for benchmark runs. Read the 
 
 ## Versions and license
 
-Harper `5.2.12` · Node `>=22` · TypeScript `7.0.2` · [Apache 2.0](LICENSE)
+Harper `5.3.2` · Node `^22.18.0 || >=24` · TypeScript `7.0.2` · [Apache 2.0](LICENSE)

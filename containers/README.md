@@ -37,7 +37,7 @@ These choices affect measurements and must match across targets:
 - **Plain HTTP on both ports.** TLS termination is excluded.
 - **Named volume on a real filesystem.** Never tmpfs.
 - **Pinned Harper version**, installed globally and checked at build time.
-- **Production dependency install:** `npm install --force --omit=dev`, matching Harper's deployment path.
+- **Production dependency install:** `npm install --force --omit=dev --ignore-scripts`, matching Harper's deployment path.
 
 ## Lifecycle
 

@@ -23,7 +23,7 @@ services:
       context: ..
       dockerfile: containers/Dockerfile
       args:
-        HARPER_VERSION: ${HARPER_VERSION:-5.2.12}
+        HARPER_VERSION: ${HARPER_VERSION:-5.3.2}
     networks: [bench]
     ports:
       # Published only so a human can poke at it. The measured generator talks over the
@@ -35,14 +35,18 @@ services:
       - harper-data:/data
     environment:
       # Harper's worker-thread count. HARPER_SET_CONFIG takes a JSON object and overrides
-      # harperdb-config.yaml at boot. Default `threads` is 4; it is pinned to the container's
-      # CPU budget here so the target is not oversubscribed against its own limit, and so the
-      # value is explicit in the run record rather than inherited.
+      # harper-config.yaml at boot. Unset, Harper derives `threads.count` from os.cpus() — the
+      # VM's CPUs, not this container's limit — capped by cgroup memory, which gives 4 workers
+      # on a 2-CPU budget. It is pinned to the CPU budget here so the target is not
+      # oversubscribed against its own limit, and so the value is explicit in the run record.
+      # The object form, not the bare number: 5.3 accepts both, but the number form drops the
+      # rest of the `threads` defaults and the startup banner then reports the count as
+      # undefined and debugging as enabled.
       # Plain HTTP, deliberately. Outside dev mode Harper defaults to HTTPS on both ports, and
       # TLS termination is a real per-request cost that has nothing to do with the
       # architecture under test. Every target must make the same choice; it is recorded with
       # the run.
-      HARPER_SET_CONFIG: '{"threads":${HARPER_THREADS:-2},"logging":{"level":"warn","stdStreams":true},"http":{"port":9926,"securePort":null},"operationsApi":{"network":{"port":9925,"securePort":null}}}'
+      HARPER_SET_CONFIG: '{"threads":{"count":${HARPER_THREADS:-2}},"logging":{"level":"warn","stdStreams":true},"http":{"port":9926,"securePort":null},"operationsApi":{"network":{"port":9925,"securePort":null}}}'
       # Harper's installer prompts interactively unless all three are supplied. Values live in
       # containers/.env — local test credentials for a container that only ever gets
       # benchmarked, reachable only on this compose bridge.

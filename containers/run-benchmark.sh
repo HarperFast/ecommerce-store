@@ -48,13 +48,16 @@ SCALE="${SCALE:-dev}"
 RATES="${RATES:-25,50,75,100,125,150,200}"
 DURATION="${DURATION:-15}"
 TRIALS="${TRIALS:-1}"
+# package.json is the one source of truth for the platform version, as in CI. The Dockerfile
+# and compose defaults are fallbacks for manual builds and must not drift from it.
+export HARPER_VERSION="${HARPER_VERSION:-$(node -p "require('../package.json').devDependencies.harper")}"
 export TARGET_CPUS="${TARGET_CPUS:-2}"
 export TARGET_MEMORY="${TARGET_MEMORY:-2g}"
 export HARPER_THREADS="${HARPER_THREADS:-2}"
 
 say() { printf '\n==> %s\n' "$*"; }
 
-say "building target (cpus=$TARGET_CPUS memory=$TARGET_MEMORY threads=$HARPER_THREADS)"
+say "building target (harper=$HARPER_VERSION cpus=$TARGET_CPUS memory=$TARGET_MEMORY threads=$HARPER_THREADS)"
 $COMPOSE build harper
 
 say "starting target"
