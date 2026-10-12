@@ -19,7 +19,7 @@ node scripts/load-dataset.mjs --scale dev
 node bench/run.mjs --duration 12
 ```
 
-Direct runs have no fixed resource budget, snapshot restore, or cold-start measurement. Their output is not a result.
+Direct runs have no fixed resource budget, snapshot restore, cold-start measurement, or target CPU figure. Their output is not a result.
 
 `--rates` overrides the load ladder. The default targets the suspected saturation range at `bench` scale and is low for `dev`.
 
@@ -36,6 +36,9 @@ A run retains per-request samples and conditions in `bench/results/run-<timestam
 | Open load model | Issue arrivals on a fixed timeline regardless of outstanding requests, so the target cannot throttle offered load. |
 | Load ladder | Locate the rate at which latency or errors exceed the target. A single saturating rate cannot locate that boundary. |
 | Generator CPU | Record CPU per step. Above 0.8 of a core, flag the step and exclude it as a target measurement. |
+| Dispatch lag | Record scheduled-arrival-to-dispatch lag per step (p50, p99, max). Above 5 ms at p99, the generator fell behind its own schedule. |
+| Target CPU | Read the target's cgroup v2 `cpu.stat` at each step boundary, per container and summed (`targetCpuSeconds`, `targetComponents`). Container runs only; see [accounting](../containers/README.md#accounting). |
+| Step boundaries | Record each step's wall-clock start, offer end, and drain end, so host-side samples can be joined to steps. |
 | In-flight ceiling | Shed and count arrivals beyond the ceiling. A shedding step's achieved rate is a lower bound, not a capacity measurement. |
 | Raw samples | Retain request samples for later distribution and interval analysis. |
 | Background writes | Update inventory and prices through the application's write surface, exercising invalidation as well as reads. |
@@ -45,10 +48,10 @@ A run retains per-request samples and conditions in `bench/results/run-<timestam
 ## Limitations
 
 - **No ground-truth correctness guard.** Every 2xx counts as success. Conformance checks determinism, but the harness does not compare responses with independently computed expected values. It needs pinned expected quotes derived from `SPEC.md`. Throughput currently says nothing about quote correctness.
-- **CPU clock is not pinned.** Do not derive cycle-normalized efficiency (ops per CPU-gigacycle) from any run produced here.
-- **No component CPU breakdown.** `targetCpuSeconds` is one number for Harper. Framework/database/cache accounting awaits an assembled stack.
+- **CPU clock is not pinned.** Do not derive cycle-normalized efficiency (ops per CPU-gigacycle) from any run produced here. On tier 2 the clock is bounded and measured on the host; nothing here joins those cycle samples to steps yet.
+- **Target CPU is CPU-seconds, not cycles.** It is the cgroup's `usage_usec` from offer start to drain end, which includes the drain of the step's own tail. Harper is one container, so its breakdown is one component; an assembled stack gets one per container.
 - **No cross-target comparison.** The orchestrator implements resource limits, restore, and cold/warm/hot phases for one target. Identical treatment across implementations has not been demonstrated.
-- **Run requirements are not verified automatically.** The orchestrator does not invoke `scripts/verify-run-record.mjs`; declared coverage alone does not validate a run. See [open work](../docs/plan.md#open).
+- **Run verification checks what the record carries.** The orchestrator runs `scripts/verify-run-record.mjs` after every trial; it cannot check what was never recorded, such as quote correctness.
 
 Dated observations and unresolved behavior belong in [docs/plan.md](../docs/plan.md#first-bench-scale-observations-2026-10-05), not a results report. Nothing from `dev` is reportable.
 

@@ -19,7 +19,8 @@
  *
  * NOT yet implemented, and therefore NOT claimed: CPU clock pinning and cycle-normalized
  * efficiency (ops per CPU-gigacycle). Without pinning, any efficiency figure from this
- * harness is wall-clock bound and must not be published. See bench/README.md.
+ * harness is wall-clock bound and must not be published. Each step carries its wall-clock
+ * start and end so host-side cycle samples (tier 2) can be joined to it. See bench/README.md.
  *
  *   node bench/run.mjs --rates 50,100,200,400 --duration 20
  */
@@ -29,6 +30,7 @@ import { promisify } from 'node:util';
 import { join } from 'node:path';
 import { cpus, totalmem, platform, release } from 'node:os';
 import { makeRequestFactory, makeWriterFactory, sampleIds } from './workload.mjs';
+import { accountStep, readAll, resolveCgroups } from './cgroups.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -40,6 +42,8 @@ const execFileAsync = promisify(execFile);
  * such rather than silently reported as the commit it is based on.
  */
 async function codeVersion() {
+	// The generator image has no git; the orchestrator reads it on the host and passes it in.
+	if (process.env.CODE_COMMIT) return { commit: process.env.CODE_COMMIT, dirty: process.env.CODE_DIRTY === '1' };
 	try {
 		const { stdout: sha } = await execFileAsync('git', ['rev-parse', 'HEAD']);
 		const { stdout: dirty } = await execFileAsync('git', ['status', '--porcelain']);
@@ -103,34 +107,23 @@ const MAX_IN_FLIGHT = Number(argOf('max-in-flight', '750'));
  * the hot number hides how long a system takes to become useful.
  */
 const COLD_MS = argOf('cold-ms', null);
-
-/** Resident CPU time of the target process, so per-step CPU can be attributed. */
-async function targetCpuSeconds(pid) {
-	if (!pid) return null;
-	try {
-		const { stdout } = await execFileAsync('ps', ['-o', 'time=', '-p', String(pid)]);
-		// macOS prints mm:ss.cc, Linux hh:mm:ss, and either may carry a dd- day prefix. The
-		// previous split-on-[:.] mapped Linux hours onto minutes and dropped the real seconds,
-		// so every committed run recorded targetCpuSeconds: 0 — a methodology requirement
-		// silently reporting garbage.
-		const match = stdout.trim().match(/^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)(?:\.(\d+))?$/);
-		if (!match) return null;
-		const [, d = 0, h = 0, m, sec, frac] = match;
-		return Number(d) * 86400 + Number(h) * 3600 + Number(m) * 60 + Number(sec) + Number(`0.${frac ?? 0}`);
-	} catch {
-		return null;
-	}
-}
-
-async function findHarperPid() {
-	try {
-		const { stdout } = await execFileAsync('bash', ['-lc', "ps -A -o pid=,command= | grep -i 'harper' | grep -v grep | head -1"]);
-		const pid = Number(stdout.trim().split(/\s+/)[0]);
-		return Number.isInteger(pid) ? pid : null;
-	} catch {
-		return null;
-	}
-}
+/**
+ * The target's cgroups, as `name=containerId` or `name=/cgroup/path`, comma-separated.
+ *
+ * Target CPU used to come from `ps` inside the generator, which cannot see the target's
+ * processes from its own container — and the image has no `ps`, so every container run
+ * recorded `targetCpuSeconds: null`. Had `ps` existed, the `grep -i harper` would have matched
+ * the generator's own command line (`--url http://harper:9926`) and reported ITS CPU as the
+ * target's. Read from cgroups instead; see bench/cgroups.mjs.
+ */
+const TARGET_CGROUPS = (argOf('target-cgroups', process.env.TARGET_CGROUPS ?? '') || '').split(',').filter(Boolean);
+/**
+ * Run conditions the generator cannot see from inside its container — platform version,
+ * image, budget, placement, tier, snapshot — recorded by the orchestrator and passed in.
+ */
+const ORCHESTRATOR_CONDITIONS = process.env.RUN_CONDITIONS ? JSON.parse(process.env.RUN_CONDITIONS) : null;
+/** Dispatch lag beyond this means the open-loop schedule slipped: the generator, not the target. */
+const DISPATCH_LAG_FLAG_MS = 5;
 
 // Nearest-rank. The Math.max guards q=0, which would otherwise index -1.
 const quantile = (sorted, q) =>
@@ -148,6 +141,7 @@ async function step({ rate, seconds, nextRequest, nextWrite, writeRate, label })
 	// Per-step, so abandoning a saturated step's tail cannot touch the next one.
 	const abort = new AbortController();
 	const startedAt = performance.now();
+	const startedAtEpochMs = Date.now();
 	const cpuBefore = process.cpuUsage();
 
 	let issued = 0;
@@ -272,6 +266,7 @@ async function step({ rate, seconds, nextRequest, nextWrite, writeRate, label })
 	// generator CPU by the same factor, which could let a saturated generator pass its own
 	// headroom check.
 	const offerSeconds = (performance.now() - startedAt) / 1000;
+	const offerEndEpochMs = Date.now();
 
 	// Drain whatever is still outstanding. Requests that never land are abandoned here, and
 	// counted — if they were allowed to run on, they would complete during the NEXT step and
@@ -281,6 +276,7 @@ async function step({ rate, seconds, nextRequest, nextWrite, writeRate, label })
 		await Promise.race([...inFlight, new Promise((r) => setTimeout(r, 100))]);
 	}
 	abort.abort();
+	const drainEndEpochMs = Date.now();
 
 	const wall = (performance.now() - startedAt) / 1000;
 	const cpu = process.cpuUsage(cpuBefore);
@@ -295,12 +291,20 @@ async function step({ rate, seconds, nextRequest, nextWrite, writeRate, label })
 	// large gap between them means the generator queued, not that the target was slow.
 	const latencies = ok.map((s) => s.arrivalMs ?? s.ms).sort((a, b) => a - b);
 	const serviceLatencies = ok.map((s) => s.ms).sort((a, b) => a - b);
+	// Scheduled arrival to dispatch, for every sample. The open model's claim is that requests
+	// leave on schedule whatever the target does; a lag here is the generator falling behind.
+	const dispatchLags = samples.map((s) => s.arrivalMs - s.ms).sort((a, b) => a - b);
 	const outstanding = inFlight.size;
 
 	return {
 		label,
 		offeredRate: rate,
 		seconds,
+		// Wall-clock boundaries, so samples taken outside the generator (cgroup CPU, perf
+		// cycles on tier 2) can be joined to the step they belong to.
+		startedAtEpochMs,
+		offerEndEpochMs,
+		drainEndEpochMs,
 		// `issued` counts arrivals actually offered; shed arrivals are reported separately and
 		// are NOT folded in, so the two always sum to what the schedule called for.
 		issued: issued - shed,
@@ -328,6 +332,9 @@ async function step({ rate, seconds, nextRequest, nextWrite, writeRate, label })
 		cacheHitRate: cacheable.length ? hits / cacheable.length : null,
 		p50Service: quantile(serviceLatencies, 0.5),
 		p99Service: quantile(serviceLatencies, 0.99),
+		dispatchLagP50: quantile(dispatchLags, 0.5),
+		dispatchLagP99: quantile(dispatchLags, 0.99),
+		dispatchLagMax: dispatchLags.at(-1) ?? NaN,
 		generatorCpuSeconds,
 		// One core's worth of the generator's own budget, over the OFFER window. Past ~0.8 the
 		// generator is a plausible bottleneck and the step must not be reported as a target
@@ -361,7 +368,11 @@ const [cartIds, productIds, skus, inventoryIds] = await Promise.all([
 
 const nextRequest = makeRequestFactory({ baseUrl: BASE_URL, cartIds, productIds, quoteShare: QUOTE_SHARE });
 const nextWrite = makeWriterFactory({ baseUrl: BASE_URL, skus, inventoryIds });
-const pid = await findHarperPid();
+const cgroups = await resolveCgroups(TARGET_CGROUPS);
+for (const cgroup of cgroups) {
+	console.log(`target cgroup ${cgroup.name}: ${cgroup.dir ?? `UNRESOLVED (${cgroup.ref}) — target CPU will be null`}`);
+}
+if (!cgroups.length) console.log('no target cgroups given — target CPU will be null');
 
 // COLD is measured by the caller restarting the target; this harness reports the first
 // observation of the warm-up step separately so the number is not silently lost.
@@ -369,15 +380,17 @@ console.log(`warm-up ${WARMUP}s (not reported as a result)`);
 const warm = await step({ rate: RATES[0], seconds: WARMUP, nextRequest, nextWrite, writeRate: WRITE_RATE, label: 'warmup' });
 console.log(`  first response ${warm.samples[0]?.ms?.toFixed(1)}ms · ${warm.errors} errors\n`);
 
-console.log('rate   offered  achieved   p50      p90      p99      max     errors  genCPU  cacheHit  inval');
-console.log('─'.repeat(100));
+console.log('rate   offered  achieved   p50      p90      p99      max     errors  genCPU  tgtCPU  cacheHit  inval');
+console.log('─'.repeat(108));
 
 const steps = [];
 for (const rate of RATES) {
-	const cpuBefore = await targetCpuSeconds(pid);
+	const cgroupsBefore = await readAll(cgroups);
 	const result = await step({ rate, seconds: DURATION, nextRequest, nextWrite, writeRate: WRITE_RATE, label: `rate-${rate}` });
-	const cpuAfter = await targetCpuSeconds(pid);
-	result.targetCpuSeconds = cpuBefore !== null && cpuAfter !== null ? cpuAfter - cpuBefore : null;
+	const cgroupsAfter = await readAll(cgroups);
+	// Over offer and drain together: the target's work for this step's arrivals ends at drain.
+	Object.assign(result, accountStep(cgroups, cgroupsBefore, cgroupsAfter));
+	result.targetCpuLoad = result.targetCpuSeconds === null ? null : result.targetCpuSeconds / ((result.drainEndEpochMs - result.startedAtEpochMs) / 1000);
 	steps.push(result);
 
 	let flag = result.generatorCpuLoad > 0.8 ? '  ⚠ GENERATOR saturated — not a target measurement' : '';
@@ -385,15 +398,32 @@ for (const rate of RATES) {
 	if (result.writeFailures > 0) flag += `  ⚠ ${result.writeFailures} write failures (coherence workload degraded)`;
 	if (result.cacheHitRate === 0) flag += '  ⚠ cache hit rate 0 (WRITE-003: freshness must not come from disabling caching)';
 	if (result.outstandingAtDeadline > 0) flag += `  ⚠ ${result.outstandingAtDeadline} never completed (tail censored)`;
+	if (result.dispatchLagP99 > DISPATCH_LAG_FLAG_MS) flag += `  ⚠ dispatch lag p99 ${result.dispatchLagP99.toFixed(1)}ms (generator behind schedule)`;
 	console.log(
 		`${String(rate).padStart(5)}  ${String(result.issued).padStart(7)}  ` +
 			`${result.achievedRate.toFixed(1).padStart(8)}  ${result.p50.toFixed(1).padStart(7)}  ` +
 			`${result.p90.toFixed(1).padStart(7)}  ${result.p99.toFixed(1).padStart(7)}  ` +
 			`${result.max.toFixed(0).padStart(7)}  ${String(result.errors).padStart(6)}  ` +
 			`${result.generatorCpuLoad.toFixed(2).padStart(6)}  ` +
+			`${(result.targetCpuLoad === null ? 'n/a' : result.targetCpuLoad.toFixed(2)).padStart(6)}  ` +
 			`${(result.cacheHitRate === null ? 'n/a' : `${(result.cacheHitRate * 100).toFixed(1)}%`).padStart(8)}  ` +
 			`${String(result.invalidations).padStart(5)}${flag}`
 	);
+}
+
+/** Derived from what the orchestrator recorded, not hardcoded. Tier 1 is signal, never results. */
+function caveats() {
+	const tier = ORCHESTRATOR_CONDITIONS?.tier ?? null;
+	const list = [];
+	if (tier !== 2) {
+		list.push(`Tier ${tier ?? 'unknown'}: CPU clock neither pinned nor measured — no cycle-normalized efficiency figure may be derived from this run.`);
+	} else {
+		list.push('Tier 2: clock bounded and measured on the host, not pinned. Cycle figures come from host samples joined on step epoch times, not from this record.');
+	}
+	if (manifest.scale !== 'bench') list.push(`Dataset "${manifest.scale}" fits in memory: not a benchmark result (DATA-004).`);
+	if (!cgroups.length || cgroups.some((cgroup) => !cgroup.dir)) list.push('Target CPU was not accounted for every target cgroup; targetCpuSeconds is null.');
+	list.push('Generator shares a host with the target; see generatorCpuLoad and dispatchLagP99 per step.');
+	return list;
 }
 
 await mkdir(OUT, { recursive: true });
@@ -408,21 +438,24 @@ await writeFile(
 				code: await codeVersion(),
 				target: BASE_URL,
 				dataset: { scale: manifest.scale, seed: manifest.seed, generatorVersion: manifest.generatorVersion, files: manifest.files },
-				host: { cpus: cpus().length, model: cpus()[0]?.model, totalmemGiB: +(totalmem() / 1024 ** 3).toFixed(1), platform: platform(), release: release() },
+				// The generator's own view: its container's CPUs and the guest kernel, not the
+				// target's budget. The target's budget and placement are in `orchestrator`.
+				generatorHost: { cpus: cpus().length, model: cpus()[0]?.model, totalmemGiB: +(totalmem() / 1024 ** 3).toFixed(1), platform: platform(), release: release() },
+				orchestrator: ORCHESTRATOR_CONDITIONS,
 				harness: {
 					quoteShare: QUOTE_SHARE, writeRate: WRITE_RATE, durationSeconds: DURATION,
 					warmupSeconds: WARMUP, maxInFlight: MAX_IN_FLIGHT,
 					keySampling: 'stride across full tables',
 					reachableKeys: { carts: cartIds.length, products: productIds.length, skus: skus.length, inventory: inventoryIds.length },
+					targetCgroups: cgroups,
+					targetCpu: cgroups.length ? 'cgroup v2 cpu.stat usage_usec, offer start to drain end' : null,
 				},
-			lifecycle: {
-				coldStartMs: COLD_MS === null ? null : Number(COLD_MS),
-				warmupFirstResponseMs: warm.samples[0]?.ms ?? null,
-			},
-				caveats: [
-					'CPU clock NOT pinned — no cycle-normalized efficiency figure may be derived from this run.',
-					'Generator shares a host with the target; see generatorCpuLoad per step.',
-				],
+				lifecycle: {
+					coldStartMs: COLD_MS === null ? null : Number(COLD_MS),
+					warmupFirstResponseMs: warm.samples[0]?.ms ?? null,
+					warmup: { startedAtEpochMs: warm.startedAtEpochMs, drainEndEpochMs: warm.drainEndEpochMs },
+				},
+				caveats: caveats(),
 			},
 			steps,
 		},
