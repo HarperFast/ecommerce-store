@@ -1,57 +1,55 @@
 # Dataset generation
 
-Status: **P0 design.** Implements [Data model](../SPEC.md#data-model).
+**Status:** P0 design. Implements the [data contract](../SPEC.md#data-model).
 
-## Generate once, commit the artifact
+## Generate once, load the artifact
 
-`DATA-003` requires every implementation to load the same data, and `DATA-005` requires it generated deterministically and kept under version control.
+The dataset is generated deterministically, committed, and checksummed (`DATA-003`, `DATA-005`). Every implementation loads that artifact. Re-running a generator in each stack would make identity depend on matching PRNG consumption, rounding, and iteration order across runtimes.
 
-The tempting approach is to ship a generator each implementation runs. It is the wrong one: it makes dataset identity depend on every implementation reproducing the same PRNG stream, the same rounding, and the same iteration order, across languages and runtimes. That is a guarantee re-proved on every comparison, and its failure mode is silent — a few hundred differing inventory rows read as a platform difference.
+The generator remains in source as the reproducibility audit trail. **Regeneration changes the contract; it is not a setup step.**
 
-> **The generator runs once. The output is committed and checksummed. Every implementation loads the artifact. Identity is established by checksum, not by re-derivation.**
+## Format and identity
 
-### Format
+Each scale has one NDJSON file per table and a `MANIFEST.json`:
 
-Newline-delimited JSON, one file per table, with canonicalized key order:
-
-```
-dataset/
-  cart.ndjson  customer.ndjson  product.ndjson  variant.ndjson
-  inventory.ndjson  location.ndjson  promotion.ndjson  rate.ndjson
+```text
+dataset/dev/
+  cart.ndjson       customer.ndjson   product.ndjson    variant.ndjson
+  inventory.ndjson  location.ndjson   promotion.ndjson  rate.ndjson
   MANIFEST.json
 ```
 
-NDJSON because it streams. The dataset is deliberately larger than memory (`DATA-004`), so an importer that must parse one large array before writing anything forces every implementation to solve a problem the benchmark is not about.
+NDJSON has canonical key order and supports streaming imports without holding the dataset in memory. The manifest records generator version, seed, per-file SHA-256, row counts, and distributions. Verify it before each load and record it with each run.
 
-`MANIFEST.json` carries the generator version, the seed, per-file SHA-256 and row counts, and the declared distributions. Verified before every run; recorded with every published result.
+`bench` files are compressed and stored in Git LFS. Expand and verify them with:
 
-## One size
+```bash
+node scripts/prepare-dataset.mjs --scale bench
+```
 
-There is one dataset, sized so the working set does not fit in memory on the benchmark hardware. No small in-memory variant, and store size is not swept as a variable — a comparison measures the architecture, not the dataset.
+Checksums cover **uncompressed bytes**, so compression does not change dataset identity.
 
-A small fixture for local development and CI is a convenience and may exist, but it is never a benchmark target and never appears in a result.
+## Scale
+
+There is one benchmark size: `bench`, designed to exceed the target's memory (`DATA-004`). Store size is not a benchmark variable. The smaller `dev` fixture is for local development and CI only and never appears in a result.
 
 ## Determinism rules
 
-Each exists because it is a way a dataset silently stops being reproducible.
+1. Consume one seeded PRNG in a fixed order. No `Math.random`, `Date.now`, `randomUUID`, or unordered iteration.
+2. Derive ids from row positions so generator changes produce meaningful diffs.
+3. Derive timestamps from row indices and a fixed epoch.
+4. Generate money as integer minor units throughout (`DATA-002`).
+5. Keep category, tier, region, jurisdiction, and option vocabularies fixed in source.
+6. Declare distributions in the manifest.
 
-1. **One seeded PRNG, consumed in a fixed order.** No `Math.random`, no `Date.now`, no `randomUUID`, no iteration over an unordered structure.
-2. **Ids are derived, not drawn** — `product-00042`, `sku-00042-03`. A generator change becomes a diff rather than a reshuffle.
-3. **No wall clock anywhere.** Timestamps derive from the row index against a fixed epoch constant.
-4. **Money is integer minor units at every step** (`DATA-002`). Prices are drawn as integers; no float is constructed and rounded.
-5. **Vocabularies are fixed tables in source** — categories, tiers, regions, jurisdictions, option axes. Never sampled externally, never model-generated.
-6. **Distributions are explicit and recorded in the manifest.**
+## Distributions
 
-### Distribution shape
+| Dimension | Required shape |
+|---|---|
+| Cart size | Mostly small carts, with a meaningful large-cart tail to exercise fan-out. |
+| Variants per product | A long tail rather than a constant. |
+| Inventory | Stock varies across locations so priority resolution does real work. |
+| Promotions | Vary eligibility and exercise stacking, exclusivity, thresholds, and BOGO. |
+| Access | A hot subset makes cache hits measurable. Reads and writes target the same working set (`WRITE-001`). |
 
-Uniform data is the easiest way to accidentally produce a flattering benchmark, because it makes caching and lookup artificially even.
-
-- **Cart size** — the load generator needs a realistic distribution, and the dataset must contain carts matching it. Most carts are small; a meaningful tail is large, and the tail is where the fan-out cost shows.
-- **Variants per product** — a long tail, not a constant.
-- **Inventory across locations** — a sku is stocked at some locations and not others, so location-priority resolution (`QUOTE-003`) does real work rather than always hitting the first.
-- **Promotion eligibility** — most carts qualify for few promotions, some for many with stacking and exclusivity in play. A dataset where promotions rarely apply would skip the pricing logic the endpoint exists to exercise.
-- **Access skew** — the read workload is not uniform over the catalog. A hot subset is what makes cache-hit rate a meaningful measurement at all, and `WRITE-001` requires the writer to target the same working set.
-
-## Why the generator still ships
-
-The artifact is what implementations consume, but the generator is committed alongside it. `DATA-005` requires the dataset be reproducible, and a committed artifact nobody can regenerate is a magic file. The generator is the audit trail; the artifact is the contract.
+The generator and harness share the access distribution in [packages/spec/src/workload.ts](../packages/spec/src/workload.ts). Current promotion-phase balance is an [open design issue](plan.md#open).

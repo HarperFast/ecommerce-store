@@ -11,7 +11,7 @@
  *
  *   node scripts/check-spec-anchors.mjs
  */
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative, extname, dirname, resolve } from 'node:path';
 
 const ROOT = new URL('..', import.meta.url).pathname;
@@ -38,8 +38,11 @@ function* files(dir) {
 	for (const name of readdirSync(dir)) {
 		if (SKIP.has(name)) continue;
 		const path = join(dir, name);
-		if (statSync(path).isDirectory()) yield* files(path);
-		else if (EXT.has(extname(name))) yield path;
+		if (statSync(path).isDirectory()) {
+			// Nested repositories have their own spec. Worktrees use a .git file;
+			// standalone checkouts use a directory. Neither belongs to this scan.
+			if (!existsSync(join(path, '.git'))) yield* files(path);
+		} else if (EXT.has(extname(name))) yield path;
 	}
 }
 

@@ -1,78 +1,68 @@
 # Benchmark harness
 
-The load harness for this implementation, standalone. It drives the specification's two endpoints over HTTP and nothing else, so it can point at any implementation — but it is not yet generalized, and no competitive target has been built.
+The HTTP load harness exercises the specification's two endpoints and concurrent background writes. It can address another implementation, but only Harper exists today.
 
-## Running
+**No run is a publishable result.** Read [Limitations](#limitations) before interpreting output. The [benchmark methodology](https://github.com/HarperFast/application-architecture-benchmarks) governs all measurements and claims.
 
-The supported path is containerized — see [`containers/README.md`](../containers/README.md), which fixes the resource budget, the networking mode, and the run lifecycle:
+## Run
+
+Use the [container workflow](../containers/README.md) to set resource limits and restore state between trials:
 
 ```bash
 SCALE=dev ./containers/run-benchmark.sh
 ```
 
-Directly against a local Harper, for iteration only:
+For local iteration against a running Harper instance:
 
 ```bash
-node scripts/load-dataset.mjs --scale dev && node bench/run.mjs --duration 12
+node scripts/load-dataset.mjs --scale dev
+node bench/run.mjs --duration 12
 ```
 
-`--rates` overrides the ladder. The default is chosen to bracket the inflection at `bench` scale, so it is deliberately low for `dev`.
+Direct runs have no fixed resource budget, snapshot restore, or cold-start measurement. Their output is not a result.
 
-## Datasets
+`--rates` overrides the load ladder. The default targets the suspected saturation range at `bench` scale and is low for `dev`.
 
-| Scale | Stored | Use |
-|---|---|---|
-| `dev` | raw, committed | Local iteration. Loads in seconds. **Never a benchmark target** — it fits entirely in memory, which is the one thing the benchmark dataset must not do. |
-| `bench` | gzipped, committed | The benchmark. Expands to several times the target container's memory budget, which is what `DATA-004` is for. |
+## Data and output
 
-Row counts and checksums live in each dataset's `MANIFEST.json` and are verified before every load. They are not repeated here: the manifest is the contract, and a second copy of it is a second thing to be wrong.
+`dev` is an in-memory fixture for development and CI, never a benchmark target. `bench` is the pinned benchmark dataset, designed to exceed target memory. See [dataset generation](../docs/seed-design.md) for storage, expansion, and checksum rules. Row counts and hashes come from each dataset's `MANIFEST.json`.
 
-`bench` is committed compressed; `node scripts/prepare-dataset.mjs --scale bench` expands and verifies it. Checksums are always over the **uncompressed** bytes — dataset identity is about the data, not the transport.
+A run retains per-request samples and conditions in `bench/results/run-<timestamp>.json` by default: dataset scale, seed, checksums, host, harness settings, and caveats. Container runs write to the `bench-results` volume under `/results`.
 
-Each step writes raw per-request samples to `bench/results/run-<timestamp>.json`, alongside the exact run conditions: dataset scale, seed and per-file checksums, host, harness settings, and the caveats that apply to that run.
+## Implemented measurements
 
-## What it implements
+| Mechanism | Purpose and interpretation |
+|---|---|
+| Open load model | Issue arrivals on a fixed timeline regardless of outstanding requests, so the target cannot throttle offered load. |
+| Load ladder | Locate the rate at which latency or errors exceed the target. A single saturating rate cannot locate that boundary. |
+| Generator CPU | Record CPU per step. Above 0.8 of a core, flag the step and exclude it as a target measurement. |
+| In-flight ceiling | Shed and count arrivals beyond the ceiling. A shedding step's achieved rate is a lower bound, not a capacity measurement. |
+| Raw samples | Retain request samples for later distribution and interval analysis. |
+| Background writes | Update inventory and prices through the application's write surface, exercising invalidation as well as reads. |
+| Access skew | Share the dataset's hot-key distribution; weight tier and region to the seeded customer population. |
+| Cache behavior | Record cache-hit rate and invalidation fan-out. Flag a zero hit rate, which may indicate the caching shortcut forbidden by `WRITE-003`. |
 
-From the measurement rules in the benchmarks README:
+## Limitations
 
-- **Open load model.** Arrivals are paced against a fixed timeline and issued whether or not earlier requests have returned. A closed loop lets the target throttle the load offered to it, which hides the saturation behaviour being looked for.
-- **Load ladder.** A single saturating rate produces no inflection point. The reportable result is "sustains N rps before p99 crosses T", which requires the ladder.
-- **Generator headroom.** The generator's own CPU is recorded per step. Above 0.8 of a core the step is flagged and must not be reported as a target measurement.
-- **In-flight ceiling.** Past the ceiling, arrivals are *shed* and counted. A step that sheds exceeded the target's capacity — its achieved rate is a lower bound, not a measurement.
-- **Raw samples retained**, so intervals can be applied later without re-running.
-- **Background writes** run concurrently with reads, so caches have to stay coherent rather than filling once and never invalidating. Writes go through the application's write surface, not the datastore — a direct write invalidates nothing, and the coherence cost is the point.
-- **A real access skew.** Keys are drawn from the distribution defined in `@ecommerce-store/spec` — the same one the dataset was built against, so the dataset's hot products and the workload's hot products are the same products. Tier and region are weighted to the seeded customer population rather than drawn uniformly.
-- **Measured cache-hit rate and invalidation fan-out**, recorded per step. A hit rate of zero is flagged: that is what `WRITE-003`'s forbidden shortcut — achieving freshness by disabling caching — looks like in the numbers.
+- **No ground-truth correctness guard.** Every 2xx counts as success. Conformance checks determinism, but the harness does not compare responses with independently computed expected values. It needs pinned expected quotes derived from `SPEC.md`. Throughput currently says nothing about quote correctness.
+- **CPU clock is not pinned.** Do not derive cycle-normalized efficiency (ops per CPU-gigacycle) from any run produced here.
+- **No component CPU breakdown.** `targetCpuSeconds` is one number for Harper. Framework/database/cache accounting awaits an assembled stack.
+- **No cross-target comparison.** The orchestrator implements resource limits, restore, and cold/warm/hot phases for one target. Identical treatment across implementations has not been demonstrated.
+- **Run requirements are not verified automatically.** The orchestrator does not invoke `scripts/verify-run-record.mjs`; declared coverage alone does not validate a run. See [open work](../docs/plan.md#open).
 
-## What it does NOT implement — and what therefore may not be claimed
+Dated observations and unresolved behavior belong in [docs/plan.md](../docs/plan.md#first-bench-scale-observations-2026-10-05), not a results report. Nothing from `dev` is reportable.
 
-- **No ground-truth correctness guard.** Every 2xx is counted as a success; no response is compared against an expected value computed independently of the implementation under test. Determinism (`QUOTE-008`) is checked and is necessary, but it is not sufficient and must not be described as if it were: **a consistently wrong answer is deterministic too.** Closing this needs pinned fixtures carrying expected quotes, derived from `SPEC.md` rather than from this implementation's output. Until then a throughput number from this harness says nothing about whether the quotes were right.
-- **CPU clock is not pinned.** No cycle-normalized efficiency figure (ops per CPU-gigacycle) may be derived from any run this harness has produced. The rules require pinning and the measurement is not currently trustworthy without it.
-- **No per-target CPU breakdown.** Harper is one process so the split that matters in an assembled stack (framework vs database vs cache) has no analogue yet. `targetCpuSeconds` is captured but is a single number.
-- **Nothing to be identical *to*.** Containerization, trial restore and the cold/warm/hot split are implemented by the orchestrator (see [`containers/README.md`](../containers/README.md)) — but there is one target, so "containerized identically for every target" is true only because the set has one member. It becomes a real constraint, and a real risk, when a second target exists.
+## Access distribution
 
-Run `bench/run.mjs` directly and you get none of the orchestrator's guarantees: no fixed resource budget, no snapshot restore between trials, no cold-start measurement. That path is for iteration, and its output is not a result.
+Uniform draws over product × tier × region rarely revisit a key during a short run, making cache hits and invalidation costs hard to measure. The shared distribution in `@ecommerce-store/spec` aligns workload and dataset hot products.
 
-## Why the access distribution is load-bearing
+Observed hit rates are much lower at `bench` scale than at `dev`. Whether this reflects a cold cache or a hot set too diffuse for the chosen skew remains open.
 
-Keys are drawn with skew because uniform draws make the cache unmeasurable. A uniform draw over the catalog crossed with tier and region spans a key space a short run almost never revisits, and the measured hit rate collapses to near zero. A cache nobody asks for twice cannot be measured, and neither can the cost of invalidating it — which silently takes `WRITE-003` and most of the write-coherence requirements out of reach without any test failing.
+## Generator headroom
 
-The skew is defined in `@ecommerce-store/spec` and shared with the dataset generator, so the dataset's hot products and the workload's hot products are the same products. A hot subset is what makes cache-hit rate mean anything.
+The generator must not become the bottleneck:
 
-Hit rate is far lower at `bench` scale than at `dev`, where the catalog fits in memory. Whether that is a cold cache over a much larger key space or a hot set too diffuse for the skew to concentrate is open — see `docs/plan.md`.
-
-## Observations
-
-Numbers this harness produces are recorded in [`docs/plan.md`](../docs/plan.md), with the conditions and caveats that apply to each. They are **not** repeated here: observations belong in one place, dated, beside the statement of what may not yet be claimed from them. A second copy drifts from the first.
-
-**No run this harness has produced is a publishable result** — see the gaps above, and `docs/plan.md`'s "What may not be claimed yet".
-
-## Keeping the generator out of the measurement
-
-The rule the measurement rules press hardest: prove the load generator is not the bottleneck. Three properties of this harness exist for that, and each is easy to get wrong in a way no test catches.
-
-- **Arrivals are not scheduled up front.** Materializing the whole timeline costs memory proportional to the run, and the generator dies before the target does.
-- **Response bodies are not retained.** Only the fields actually read are kept per sample — notably not the `Server-Timing` string, when a single flag is all that is ever read from it. At `bench` scale aggregates run to tens of kilobytes, and a saturated step holds a great many at once.
-- **The in-flight ceiling is a measurement choice, not just a safety valve.** A target serving a given rate at sub-second latency has roughly that many requests outstanding at steady state. A ceiling far above that queues work and measures the generator's own backlog rather than the target.
-
-Abandoned requests are aborted at step end. Otherwise a saturated step's stragglers complete during the *next* step and are attributed to a rate they were never offered at.
+- Schedule arrivals incrementally; a materialized timeline consumes memory proportional to run length.
+- Retain only needed sample fields, not response bodies or unused timing strings.
+- Choose an in-flight ceiling appropriate to expected rate and latency. Excessive queuing can measure generator backlog instead of target behavior.
+- Abort outstanding requests at step end so their completions cannot contaminate the next step.
