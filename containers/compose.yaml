@@ -58,12 +58,10 @@ services:
         limits:
           cpus: "${TARGET_CPUS:-2}"
           memory: "${TARGET_MEMORY:-2g}"
-    healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://localhost:9926/product/product-000000?tier=standard&region=us-east').then(r=>process.exit(r.status<500?0:1)).catch(()=>process.exit(1))"]
-      interval: 5s
-      timeout: 5s
-      retries: 30
-      start_period: 20s
+    # No healthcheck, deliberately. A compose healthcheck execs its probe INSIDE the target
+    # every interval for the life of the container — a Node process every 5 s, charged to the
+    # budget under measurement for the whole run. Readiness is probed from outside instead
+    # (containers/wait-ready.mjs), and no target in a comparison may run one either.
 
   bench:
     image: node:24-slim
@@ -72,9 +70,17 @@ services:
     volumes:
       - ../:/work:ro
       - bench-results:/results
+      # Expanded datasets live outside the checkout's tracked tree (.work/ by default), and a
+      # worktree can point DATASET_ROOT at another checkout's expansion instead of re-expanding.
+      - ${DATASET_ROOT:-../.work/dataset}:/dataset:ro
+      # The host's cgroup v2 tree, read-only, so the generator can account the TARGET's CPU per
+      # step from its container scope. The generator shares a kernel with the target on both
+      # tiers (a Podman VM, a Linux host), and a process inside the generator cannot see the
+      # target's processes at all.
+      - /sys/fs/cgroup:/host-cgroup:ro
     depends_on:
       harper:
-        condition: service_healthy
+        condition: service_started
     environment:
       TARGET_URL: http://harper:9926
       OPS_URL: http://harper:9925

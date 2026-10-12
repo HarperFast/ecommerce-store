@@ -4,7 +4,7 @@
 # Implements the run lifecycle from the benchmarks README in order, because how a system is
 # loaded determines what is resident when measurement starts:
 #
-#   1. Seed      — load the versioned dataset. NOT measured.
+#   1. Seed      — load the versioned dataset into an EMPTY target. NOT measured.
 #   2. Cold      — start the target, measure time to first successful response.
 #   3. Warm-up   — a fixed workload, identical for every target. Not a tuning budget.
 #   4. Measure   — the reported run.
@@ -12,9 +12,28 @@
 # Because the workload includes writes, state does not survive between trials. A snapshot is
 # taken after seeding and restored before each trial, so the third trial is not measuring a
 # catalog the first two already mutated.
+#
+# Settings (environment; containers/.env supplies defaults and never overrides what is set):
+#
+#   SCALE            dev | bench                                     (dev)
+#   RATES DURATION   the ladder, offered rps and seconds per step    (25..200, 15)
+#   TRIALS           measured trials; 0 seeds and snapshots only     (1)
+#   SKIP_LOAD=1      restore the existing snapshot instead of seeding
+#   COMPOSE_EXTRA    extra compose files layered over compose.yaml, space-separated, relative
+#                    to containers/ — e.g. compose.tier2.yaml for tier-2 slice placement
+#   TIER             1 (local containers) | 2 (Linux host); recorded, and sets the caveats
+#   PRE_START_HOOK   host command run between stopping the target and its measured start —
+#                    tier 2: `sync; echo 3 > /proc/sys/vm/drop_caches` (as root)
+#   DATASET_ROOT     where expanded datasets live                    (<repo>/.work/dataset)
+#   SNAPSHOT_DIR     where snapshots and their provenance live       (containers/.snapshots)
+#   TARGET_CGROUPS   override the target's cgroups for CPU accounting, `name=id-or-/path,...`
+#   CONDITIONS_DIR   an external run-conditions record (tier 2: conditions.sh), referenced
+#   KEEP_TARGET=1    leave the target running at the end
+#   ALLOW_UNVERIFIED_SNAPSHOT=1   restore a snapshot whose provenance is missing or differs
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
+REPO="$(cd .. && pwd)"
 
 # Resolve the container CLI rather than assuming `docker`.
 #
@@ -29,17 +48,18 @@ else
   echo "need docker or podman on PATH" >&2
   exit 1
 fi
-COMPOSE="$CONTAINER_CLI compose -f compose.yaml"
 
-# Load the local container settings — the loader and the write stream both authenticate
-# against the operations API, which `harper run` requires. Sourcing this by hand is why it
-# worked interactively and failed the moment it ran unattended.
-if [ -f .env ]; then
-  set -a; . ./.env; set +a
-else
+# Load the local container settings — the loader authenticates against the operations API,
+# which `harper run` requires. A variable already set in the environment wins: sourcing the
+# file with `set -a` silently replaced `TARGET_CPUS=4 ./run-benchmark.sh` with the file's 2.
+if [ ! -f .env ]; then
   echo "containers/.env not found — copy containers/.env.example and set a password" >&2
   exit 1
 fi
+while IFS='=' read -r key value; do
+  case "$key" in ''|\#*) continue ;; esac
+  [ -n "${!key+set}" ] || export "$key=$value"
+done < .env
 
 SCALE="${SCALE:-dev}"
 # Default ladder brackets the knee at BENCH scale, where the working set does not fit in
@@ -48,28 +68,81 @@ SCALE="${SCALE:-dev}"
 RATES="${RATES:-25,50,75,100,125,150,200}"
 DURATION="${DURATION:-15}"
 TRIALS="${TRIALS:-1}"
+TIER="${TIER:-1}"
 # package.json is the one source of truth for the platform version, as in CI. The Dockerfile
 # and compose defaults are fallbacks for manual builds and must not drift from it.
 export HARPER_VERSION="${HARPER_VERSION:-$(node -p "require('../package.json').devDependencies.harper")}"
 export TARGET_CPUS="${TARGET_CPUS:-2}"
 export TARGET_MEMORY="${TARGET_MEMORY:-2g}"
 export HARPER_THREADS="${HARPER_THREADS:-2}"
+export DATASET_ROOT="${DATASET_ROOT:-$REPO/.work/dataset}"
+SNAPSHOT_DIR="${SNAPSHOT_DIR:-$PWD/.snapshots}"
+mkdir -p "$DATASET_ROOT" "$SNAPSHOT_DIR"
+
+COMPOSE_FILES="compose.yaml ${COMPOSE_EXTRA:-}"
+COMPOSE="$CONTAINER_CLI compose"
+for file in $COMPOSE_FILES; do COMPOSE="$COMPOSE -f $file"; done
+
+if [ "$SCALE" = dev ]; then
+  DATASET_HOST="$REPO/dataset/dev"
+  DATASET_IN_BENCH=/work/dataset/dev
+else
+  DATASET_HOST="$DATASET_ROOT/$SCALE"
+  DATASET_IN_BENCH="/dataset/$SCALE"
+fi
+SNAPSHOT="$SNAPSHOT_DIR/${SCALE}-harper-${HARPER_VERSION}.tar.gz"
+PROBE_URL="http://localhost:9926/product/product-000000?tier=standard&region=us-east"
 
 say() { printf '\n==> %s\n' "$*"; }
+now_ms() { node -e 'console.log(Date.now())'; }
+sha256_of() { node -e "const c=require('node:crypto').createHash('sha256'); for (const f of process.argv.slice(1)) c.update(require('node:fs').readFileSync(f)); console.log(c.digest('hex'))" "$@"; }
 
-say "building target (harper=$HARPER_VERSION cpus=$TARGET_CPUS memory=$TARGET_MEMORY threads=$HARPER_THREADS)"
+target_id() { $COMPOSE ps -q harper 2>/dev/null | head -1; }
+stop_target() { $COMPOSE stop harper >/dev/null 2>&1 || true; }
+start_target() { $COMPOSE up -d harper >/dev/null; }
+wait_ready() { node wait-ready.mjs --url "$PROBE_URL" --accept "$1" --since "$2"; }
+
+# Snapshot provenance: what the archived storage was produced by. A snapshot taken under
+# another Harper version, schema (indexes are storage), dataset, or architecture is not the
+# state this run claims to start from — a tier-1 arm64 snapshot copied to an x86-64 tier-2
+# host would otherwise be restored without complaint.
+provenance() {
+  node -e '
+    const [scale, manifestSha, schemaSha, harperVersion, arch, imageId, commit, dirty] = process.argv.slice(1);
+    console.log(JSON.stringify({ scale, datasetManifestSha256: manifestSha, schemaSha256: schemaSha, harperVersion, arch, imageId, code: { commit, dirty: dirty === "1" } }));
+  ' "$SCALE" "$(sha256_of "$DATASET_HOST/MANIFEST.json")" "$(sha256_of "$REPO"/schemas/*.graphql)" \
+    "$HARPER_VERSION" "$IMAGE_ARCH" "$IMAGE_ID" "$CODE_COMMIT" "$CODE_DIRTY"
+}
+check_provenance() {
+  local recorded="$SNAPSHOT.json"
+  if [ ! -f "$recorded" ]; then
+    echo "snapshot $SNAPSHOT has no provenance record ($recorded)" >&2
+    [ "${ALLOW_UNVERIFIED_SNAPSHOT:-0}" = 1 ] && return 0
+    exit 1
+  fi
+  node -e '
+    const recorded = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+    const current = JSON.parse(process.argv[2]);
+    const keys = ["scale", "datasetManifestSha256", "schemaSha256", "harperVersion", "arch"];
+    const differs = keys.filter((k) => recorded[k] !== current[k]);
+    for (const k of differs) console.error(`snapshot ${k}: ${recorded[k]}, this run: ${current[k]}`);
+    process.exit(differs.length ? 1 : 0);
+  ' "$recorded" "$(provenance)" || { [ "${ALLOW_UNVERIFIED_SNAPSHOT:-0}" = 1 ] || exit 1; }
+}
+
+restore_snapshot() {
+  stop_target
+  $COMPOSE run --rm --no-deps -v "$SNAPSHOT_DIR:/snap:ro" harper \
+    bash -c "rm -rf /data/* /data/.[!.]* && tar -C /data -xzf /snap/$(basename "$SNAPSHOT")" >/dev/null
+}
+
+CODE_COMMIT="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo)"
+CODE_DIRTY="$([ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ] && echo 1 || echo 0)"
+
+say "building target (harper=$HARPER_VERSION cpus=$TARGET_CPUS memory=$TARGET_MEMORY threads=$HARPER_THREADS tier=$TIER)"
 $COMPOSE build harper
-
-say "starting target"
-$COMPOSE up -d harper
-
-say "waiting for health"
-for _ in $(seq 1 60); do
-  status=$($COMPOSE ps --format json harper 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s.trim().split("\n")[0]);console.log(j.Health||j.State||"")}catch{console.log("")}})' || echo "")
-  [ "$status" = "healthy" ] && break
-  sleep 3
-done
-say "target health: ${status:-unknown}"
+IMAGE_ID="$($CONTAINER_CLI image inspect --format '{{.Id}}' "$($COMPOSE config --images harper 2>/dev/null | head -1)" 2>/dev/null || echo unknown)"
+IMAGE_ARCH="$($CONTAINER_CLI image inspect --format '{{.Architecture}}' "$IMAGE_ID" 2>/dev/null || echo unknown)"
 
 # --- 1. seed (not measured) --------------------------------------------------------------
 #
@@ -78,67 +151,118 @@ say "target health: ${status:-unknown}"
 # The RESTORE is not optional even then: a previous run's background writes mutated the
 # data, and a trial must start from the state the snapshot captured.
 if [ "${SKIP_LOAD:-0}" = "1" ]; then
-  if [ ! -f ".snapshots/${SCALE}.tar.gz" ]; then
-    echo "SKIP_LOAD=1 but .snapshots/${SCALE}.tar.gz does not exist" >&2
+  if [ ! -f "$SNAPSHOT" ]; then
+    echo "SKIP_LOAD=1 but $SNAPSHOT does not exist" >&2
     exit 1
   fi
-  say "SKIP_LOAD — restoring $SCALE from the existing snapshot"
-  $COMPOSE stop harper >/dev/null
-  $COMPOSE run --rm --no-deps -v "$PWD/.snapshots:/snap" harper \
-    bash -c "rm -rf /data/* && tar -C /data -xzf /snap/${SCALE}.tar.gz" >/dev/null
-  $COMPOSE up -d harper
-  sleep 15
+  check_provenance
+  say "SKIP_LOAD — restoring $(basename "$SNAPSHOT")"
+  restore_snapshot
 else
   if [ "$SCALE" != "dev" ]; then
-    say "expanding $SCALE dataset"
-    (cd .. && node scripts/prepare-dataset.mjs --scale "$SCALE")
+    say "expanding $SCALE dataset into $DATASET_HOST"
+    (cd .. && node scripts/prepare-dataset.mjs --scale "$SCALE" --out "$DATASET_HOST")
   fi
 
+  # Into an EMPTY target. The loader upserts, so loading over a previous state kept every row
+  # the incoming dataset does not contain — a dev load over a bench volume is a mix of two
+  # datasets that reports a clean load.
+  say "seeding an empty target"
+  stop_target
+  $COMPOSE run --rm --no-deps harper bash -c 'rm -rf /data/* /data/.[!.]*' >/dev/null
+  start_target
+  wait_ready any "$(now_ms)" >/dev/null
+
   say "loading dataset ($SCALE) — not measured"
-  (cd .. && node scripts/load-dataset.mjs --scale "$SCALE" --url http://localhost:9925)
+  (cd .. && node scripts/load-dataset.mjs --scale "$SCALE" --dataset "$DATASET_HOST" --url http://localhost:9925)
 
   # --- snapshot, so trials start from identical state ---------------------------------------
-  say "snapshotting loaded state for trial restore"
-  $COMPOSE stop harper >/dev/null
-  # NO `-v harper-data:/data` here: that names an UNSCOPED docker volume, while the service
-  # uses the compose-project-scoped `harper-ecommerce-bench_harper-data`. The explicit mount
-  # replaced the service's own, so the snapshot archived an empty volume and the restore
-  # restored it — leaving the target's mutated state to survive between trials, which is the
-  # exact thing the snapshot exists to prevent.
-  $COMPOSE run --rm --no-deps -v "$PWD/.snapshots:/snap" harper \
-    bash -c "tar -C /data -czf /snap/${SCALE}.tar.gz ." >/dev/null
-  $COMPOSE up -d harper
+  say "snapshotting loaded state to $(basename "$SNAPSHOT")"
+  stop_target
+  # NO `-v harper-data:/data` here: that names an UNSCOPED volume, while the service uses the
+  # compose-project-scoped `harper-ecommerce-bench_harper-data`. The explicit mount replaced
+  # the service's own, so the snapshot archived an empty volume and the restore restored it.
+  $COMPOSE run --rm --no-deps -v "$SNAPSHOT_DIR:/snap" harper \
+    bash -c "tar -C /data -czf /snap/$(basename "$SNAPSHOT") ." >/dev/null
+  provenance | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.stringify({...JSON.parse(s), createdAt: new Date().toISOString()}, null, 2)))' > "$SNAPSHOT.json"
 fi
 
-for trial in $(seq 1 "$TRIALS"); do
+failed_trials=0
+trial=1
+while [ "$trial" -le "$TRIALS" ]; do
   if [ "$trial" -gt 1 ]; then
     say "restoring snapshot for trial $trial"
-    $COMPOSE stop harper >/dev/null
-    $COMPOSE run --rm --no-deps -v "$PWD/.snapshots:/snap" harper \
-      bash -c "rm -rf /data/* && tar -C /data -xzf /snap/${SCALE}.tar.gz" >/dev/null
-    $COMPOSE up -d harper
-    sleep 10
+    restore_snapshot
   fi
 
   # --- 2. cold start ----------------------------------------------------------------------
+  # stop → hook → start, so the hook (a page-cache drop on tier 2) lands between them. The
+  # probe runs on the host, outside the target's budget, every 25 ms.
   say "trial $trial — cold start"
-  $COMPOSE restart harper >/dev/null
-  cold_start=$(node -e 'console.log(Date.now())')
-  until $COMPOSE exec -T harper node -e \
-      "fetch('http://localhost:9926/product/product-000000?tier=standard&region=us-east').then(r=>process.exit(r.status<500?0:1)).catch(()=>process.exit(1))" 2>/dev/null; do
-    sleep 1
-  done
-  cold_ms=$(node -e "console.log(Date.now() - $cold_start)")
-  say "trial $trial — cold start to first response: ${cold_ms}ms"
+  stop_target
+  if [ -n "${PRE_START_HOOK:-}" ]; then
+    say "pre-start hook: $PRE_START_HOOK"
+    bash -c "$PRE_START_HOOK"
+  fi
+  cold_start=$(now_ms)
+  start_target
+  cold_ms=$(wait_ready ok "$cold_start")
+  say "trial $trial — cold start to first successful response: ${cold_ms}ms"
+
+  target="$(target_id)"
+  cgroups="${TARGET_CGROUPS:-harper=$target}"
+  others="$($CONTAINER_CLI ps --format '{{.Names}}' | grep -v '^harper-ecommerce-bench' | paste -sd, - || true)"
+  conditions="$(node -e '
+    const [tier, cli, cliVersion, composeFiles, harperVersion, imageId, arch, cpus, memory, threads, benchCpus, benchMemory, snapshot, hook, conditionsDir, others, coldMs] = process.argv.slice(1);
+    let snapshotProvenance = null;
+    try { snapshotProvenance = JSON.parse(require("node:fs").readFileSync(snapshot + ".json", "utf8")); } catch {}
+    console.log(JSON.stringify({
+      tier: Number(tier), containerCli: cli, containerCliVersion: cliVersion, composeFiles: composeFiles.trim().split(/\s+/),
+      network: "compose bridge", tls: false,
+      target: { harperVersion, image: { id: imageId, arch }, budget: { cpus: Number(cpus), memory, threads: Number(threads) } },
+      generator: { budget: { cpus: Number(benchCpus), memory: benchMemory } },
+      snapshot: { file: require("node:path").basename(snapshot), provenance: snapshotProvenance },
+      preStartHook: hook || null, coldStart: { ms: Number(coldMs), probe: "host, published port, 25 ms, first 2xx" },
+      conditionsDir: conditionsDir || null,
+      otherContainersRunning: others ? others.split(",") : [],
+    }));
+  ' "$TIER" "$CONTAINER_CLI" "$($CONTAINER_CLI --version)" "$COMPOSE_FILES" "$HARPER_VERSION" "$IMAGE_ID" "$IMAGE_ARCH" \
+    "$TARGET_CPUS" "$TARGET_MEMORY" "$HARPER_THREADS" "${BENCH_CPUS:-2}" "${BENCH_MEMORY:-1g}" "$SNAPSHOT" \
+    "${PRE_START_HOOK:-}" "${CONDITIONS_DIR:-}" "$others" "$cold_ms")"
+  [ -n "$others" ] && say "other containers running on this machine (recorded): $others"
 
   # --- 3 + 4. warm-up and measure, from a container OUTSIDE the target's budget -----------
   say "trial $trial — ladder $RATES"
-  $COMPOSE run --rm bench node bench/run.mjs \
+  log="$(mktemp)"
+  $COMPOSE run --rm \
+    -e RUN_CONDITIONS="$conditions" -e TARGET_CGROUPS="$cgroups" \
+    -e CODE_COMMIT="$CODE_COMMIT" -e CODE_DIRTY="$CODE_DIRTY" \
+    bench node bench/run.mjs \
     --url http://harper:9926 --ops http://harper:9925 \
-    --dataset "$( [ "$SCALE" = dev ] && echo /work/dataset/dev || echo /work/.work/dataset/$SCALE )" \
+    --dataset "$DATASET_IN_BENCH" \
     --rates "$RATES" --duration "$DURATION" --out /results \
-    --cold-ms "$cold_ms"
+    --cold-ms "$cold_ms" | tee "$log"
+  record="$(sed -n 's/^raw samples retained: //p' "$log" | tail -1)"
+  rm -f "$log"
+
+  # --- run-level requirements and measurement rules, against the record just written ------
+  # A trial that fails is re-run; its record is kept, never deleted.
+  say "trial $trial — verifying $record"
+  if ! $COMPOSE run --rm --no-deps bench node scripts/verify-run-record.mjs $([ "$SCALE" = dev ] && echo --dev) "$record"; then
+    failed_trials=$((failed_trials + 1))
+  fi
+  trial=$((trial + 1))
 done
 
+if [ "${KEEP_TARGET:-0}" != 1 ]; then
+  # Targets share one budget on tier 2: a resident target holds memory inside the next one's.
+  say "stopping the target (KEEP_TARGET=1 leaves it up)"
+  stop_target
+fi
+
 say "results are in the bench-results volume:"
-echo "  docker compose -f containers/compose.yaml run --rm bench ls -la /results"
+echo "  $COMPOSE run --rm --no-deps bench ls -la /results"
+if [ "$failed_trials" -gt 0 ]; then
+  echo "$failed_trials trial(s) failed run-record verification — re-run them; their records are kept" >&2
+  exit 1
+fi
