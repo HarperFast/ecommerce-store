@@ -45,6 +45,9 @@ if (!reachable) {
 	fail('DATA-004', 'the record does not state how many keys the workload could reach');
 } else {
 	notes.push(`reachable keys: ${Object.entries(reachable).map(([k, v]) => `${k}=${v}`).join(' ')}`);
+	if (!(reachable.writeSkus > 0 && reachable.writeInventory > 0)) {
+		fail('WRITE-001', 'the record does not show write keys drawn from the products the reads sample');
+	}
 }
 if (conditions.harness?.keySampling !== 'stride across full tables') {
 	fail('DATA-004', `key sampling is "${conditions.harness?.keySampling}"; a prefix sample does not establish a working set`);
@@ -65,8 +68,10 @@ for (const step of steps) {
 	if (step.writeFailures > 0) {
 		fail('WRITE-001', `step ${step.label} had ${step.writeFailures} failed writes — the coherence workload was degraded`);
 	}
+	// A note, not a failure: CACHE-002 allows a stack to bound staleness by expiry alone, and
+	// SPEC.md does not define `invalidated` — Harper counts keys targeted, a Redis DEL keys removed.
 	if ((step.invalidations ?? 0) === 0 && step.writesIssued > 0) {
-		fail('WRITE-001', `step ${step.label} wrote ${step.writesIssued} times and invalidated nothing`);
+		notes.push(`step ${step.label} wrote ${step.writesIssued} times and reported no invalidations`);
 	}
 }
 
@@ -80,7 +85,21 @@ for (const step of steps) {
 }
 
 // --- METHOD: measurement rules, not requirements --------------------------------------------
+if (record.complete !== true) fail('METHOD', 'the ladder did not finish; this record holds only the steps completed before the generator stopped');
+const ladder = conditions.harness?.rates;
+if (Array.isArray(ladder) && ladder.length !== steps.length) {
+	fail('METHOD', `the ladder had ${ladder.length} rates and the record ${steps.length} steps`);
+}
+if (!conditions.orchestrator) fail('METHOD', 'no orchestrator conditions: not a container run with a fixed budget, restore, and cold start');
+else if (conditions.orchestrator.coldStart?.ms == null) fail('METHOD', 'no cold-start measurement');
 for (const step of steps) {
+	if (step.encodedResponses > 0) {
+		fail('METHOD', `step ${step.label}: ${step.encodedResponses} compressed responses — compression is excluded for every target`);
+	}
+	if (step.outstandingAtDeadline > 0) {
+		notes.push(`step ${step.label}: ${step.outstandingAtDeadline} requests never completed — its latency tail is censored`);
+	}
+	if (step.saturated) notes.push(`step ${step.label}: saturated — its achieved rate is a floor, not a capacity`);
 	if (step.targetCpuSeconds === null || step.targetCpuSeconds === undefined) {
 		fail('METHOD', `step ${step.label} has no target CPU figure; per-target CPU is a measurement rule`);
 	}

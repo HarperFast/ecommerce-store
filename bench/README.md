@@ -39,11 +39,14 @@ A run retains per-request samples and conditions in `bench/results/run-<timestam
 | Dispatch lag | Record scheduled-arrival-to-dispatch lag per step (p50, p99, max). Above 5 ms at p99, the generator fell behind its own schedule. |
 | Target CPU | Read the target's cgroup v2 `cpu.stat` at each step boundary, per container and summed (`targetCpuSeconds`, `targetComponents`). Container runs only; see [accounting](../containers/README.md#accounting). |
 | Step boundaries | Record each step's wall-clock start, offer end, and drain end, so host-side samples can be joined to steps. |
-| In-flight ceiling | Shed and count arrivals beyond the ceiling. A shedding step's achieved rate is a lower bound, not a capacity measurement. |
+| In-flight ceiling | Shed and count read arrivals beyond the ceiling; a shed arrival still consumes its key draw, so the sequence stays identical across targets. Writes are outside the ceiling. |
+| Achieved rate | Successful responses completed *inside* the offer window. A step is `saturated` when it shed arrivals or completed under 95% of the offered rate in the window; its achieved rate is then a floor, not a capacity. |
 | Raw samples | Retain request samples for later distribution and interval analysis. |
-| Background writes | Update inventory and prices through the application's write surface, exercising invalidation as well as reads. |
+| Background writes | Update inventory and prices through the application's write surface, exercising invalidation as well as reads. Write keys are the variants and inventory of the sampled products, drawn with the reads' skew, so writes land on what is read (`WRITE-001`). Each write times out after 30 s and counts as failed. |
 | Access skew | Share the dataset's hot-key distribution; weight tier and region to the seeded customer population. |
-| Cache behavior | Record cache-hit rate and invalidation fan-out. Flag a zero hit rate, which may indicate the caching shortcut forbidden by `WRITE-003`. |
+| Cache behavior | Record the product endpoint's cache-hit rate (the quote is never cacheable) and the write surface's reported invalidations. Flag a zero hit rate, which may indicate the caching shortcut forbidden by `WRITE-003`. |
+| No compression | Request `accept-encoding: identity` and count encoded responses; any fails verification. |
+| Partial records | Rewrite the run record after every step, so a generator that dies keeps the steps it finished (`complete: false`). |
 
 ## Limitations
 

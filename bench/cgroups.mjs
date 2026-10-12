@@ -25,9 +25,10 @@ async function findScope(root, id, depth = 0) {
 	} catch {
 		return null;
 	}
-	// `libpod-<id>.scope` or `docker-<id>.scope` — not Podman's `libpod-conmon-<id>.scope`, which
-	// holds only the container monitor and ends in the same id.
-	const isContainerScope = (name) => name.endsWith(`-${id}.scope`) && !name.includes('-conmon-');
+	// `libpod-<id>.scope` or `docker-<id>.scope` (systemd driver), or a bare `<id>` directory
+	// (cgroupfs driver) — not Podman's `libpod-conmon-<id>.scope`, which holds only the
+	// container monitor and ends in the same id.
+	const isContainerScope = (name) => name === id || (name.endsWith(`-${id}.scope`) && !name.includes('-conmon-'));
 	for (const entry of entries) {
 		if (entry.isDirectory() && isContainerScope(entry.name)) return join(root, entry.name);
 	}
@@ -39,7 +40,10 @@ async function findScope(root, id, depth = 0) {
 	return null;
 }
 
-/** Resolve `name=idOrPath` specs to cgroup directories. Unresolvable specs are reported, not dropped. */
+/**
+ * Resolve `name=idOrPath` specs to cgroup directories. Unresolvable specs are reported, not
+ * dropped. A spec nested inside another is refused: its CPU is already in its parent's.
+ */
 export async function resolveCgroups(specs) {
 	const resolved = [];
 	for (const spec of specs) {
@@ -53,6 +57,10 @@ export async function resolveCgroups(specs) {
 			} catch {}
 		}
 		resolved.push({ name, ref, dir: readable ? dir : null });
+	}
+	for (const inner of resolved) {
+		const outer = resolved.find((other) => other !== inner && other.dir && inner.dir?.startsWith(`${other.dir}/`));
+		if (outer) throw new Error(`target cgroup ${inner.name} is inside ${outer.name}; it would be counted twice`);
 	}
 	return resolved;
 }
@@ -99,19 +107,24 @@ export async function readAll(cgroups) {
  * figure null rather than a partial sum that would undercount the target.
  */
 export function accountStep(cgroups, before, after) {
+	// A counter that went backwards was reset — the cgroup was recreated mid-step — and a field
+	// the kernel did not report (no cpu controller on a slice) is unknown, not zero.
+	const delta = (a, b, scale = 1) => (a === null || b === null || b < a ? null : (b - a) / scale);
 	const components = cgroups.map((cgroup, i) => {
 		const a = before[i];
 		const b = after[i];
-		if (!a || !b || a.usageUsec === null || b.usageUsec === null) return { name: cgroup.name, cpuSeconds: null };
+		const cpuSeconds = a && b ? delta(a.usageUsec, b.usageUsec, 1e6) : null;
+		if (cpuSeconds === null) return { name: cgroup.name, cpuSeconds: null };
 		return {
 			name: cgroup.name,
-			cpuSeconds: (b.usageUsec - a.usageUsec) / 1e6,
-			userSeconds: (b.userUsec - a.userUsec) / 1e6,
-			systemSeconds: (b.systemUsec - a.systemUsec) / 1e6,
-			throttledPeriods: b.nrThrottled - a.nrThrottled,
-			throttledSeconds: (b.throttledUsec - a.throttledUsec) / 1e6,
+			cpuSeconds,
+			userSeconds: delta(a.userUsec, b.userUsec, 1e6),
+			systemSeconds: delta(a.systemUsec, b.systemUsec, 1e6),
+			throttledPeriods: delta(a.nrThrottled, b.nrThrottled),
+			throttledSeconds: delta(a.throttledUsec, b.throttledUsec, 1e6),
 			memoryCurrentBytes: b.memoryCurrent,
-			memoryPeakBytes: b.memoryPeak,
+			// memory.peak is the cgroup's high-water mark since it was created, not this step's.
+			memoryPeakSinceStartBytes: b.memoryPeak,
 		};
 	});
 	const complete = components.length > 0 && components.every((c) => c.cpuSeconds !== null);
