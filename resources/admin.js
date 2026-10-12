@@ -12,26 +12,18 @@
  *
  * Not an endpoint under test: its own latency is not a headline metric (SPEC.md#background-writes).
  */
-import { Resource, getContext } from 'harper';
+import { Resource, getContext, tables } from 'harper';
+import { lookupTable } from './lib/lookup.js';
 import { REGIONS, TIERS, viewKey } from './product.js';
 
 const { Variant, Inventory, Location, ProductView } = tables;
 
-/** Region of a fulfillment location. Few and static, so resolved once. */
-let regionOfLocation = null;
-function loadLocationRegions() {
-	if (!regionOfLocation) {
-		regionOfLocation = (async () => {
-			const map = new Map();
-			for await (const location of Location.search({})) map.set(location.id, location.region);
-			return map;
-		})().catch((error) => {
-			regionOfLocation = null;
-			throw error;
-		});
-	}
-	return regionOfLocation;
-}
+/** Region of each fulfillment location: which views an inventory write can change. */
+const loadLocationRegions = lookupTable(async () => {
+	const map = new Map();
+	for await (const location of Location.search({})) map.set(location.id, location.region);
+	return map;
+});
 
 /**
  * Invalidate the cached views a write can have changed, and only those.

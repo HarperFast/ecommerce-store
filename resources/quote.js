@@ -8,18 +8,16 @@
  * The waves are explicit and ordered because the dependency structure IS the measurement:
  * each wave needs the previous wave's result before it can issue its reads.
  */
-import { Resource } from 'harper';
+import { Resource, tables } from 'harper';
 import { UNRESTRICTED } from '@ecommerce-store/spec';
+import { lookupTable } from './lib/lookup.js';
 import { evaluatePromotions, isEligible, resolveShipping, resolveTax, resolveUnitPrice } from './lib/pricing.js';
 
 const { Cart, Customer, Product, Variant, Inventory, Location, Promotion, Rate } = tables;
 
-// Locations and rates are small, static lookup tables. Resolving them per request would
-// measure dictionary loading, not architecture. Promotions are NOT cached this way — they
-// are part of the measured fan-out.
-let staticTables = null;
-async function loadStatic() {
-	if (staticTables) return staticTables;
+// Locations and rates are small lookup tables, memoized per worker and bounded by expiry
+// (lib/lookup.js). Promotions are NOT cached this way — they are part of the measured fan-out.
+const loadStatic = lookupTable(async () => {
 	const locations = [];
 	for await (const row of Location.search({})) locations.push(row);
 	locations.sort((a, b) => a.priority - b.priority);
@@ -30,9 +28,8 @@ async function loadStatic() {
 	// could price differently on two nodes holding identical data — a QUOTE-008 violation
 	// that would look like a caching bug.
 	rates.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-	staticTables = { locations, rates };
-	return staticTables;
-}
+	return { locations, rates };
+});
 
 export class quote extends Resource {
 	static path = '/cart/:id/quote';
@@ -66,7 +63,7 @@ export class quote extends Resource {
 			throw error;
 		}
 
-		const { locations, rates } = await loadStatic();
+		const { locations, rates } = await timed(loadStatic);
 
 		// --- wave 2: product and variant per line, plus the customer ----------------------
 		const [customer, resolved] = await timed(() =>

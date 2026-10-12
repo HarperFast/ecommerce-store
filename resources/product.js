@@ -12,6 +12,7 @@
  * costs, not about who remembered to cache (SPEC.md#caching).
  */
 import { RequestTarget, Resource, tables } from 'harper';
+import { lookupTable } from './lib/lookup.js';
 import { resolveUnitPrice } from './lib/pricing.js';
 
 const { Product, Variant, Inventory, Location, ProductView } = tables;
@@ -23,31 +24,19 @@ export const REGIONS = ['us-east', 'us-west', 'eu-central', 'apac'];
 export const viewKey = (productId, tier, region) => `${productId}:${tier}:${region}`;
 
 /**
- * Locations are few and static; resolving them per request would measure nothing useful.
- *
- * The cached value is the PROMISE, not the Map. Caching the Map meant assigning an empty one
- * before the `for await` that fills it, so any request arriving during the first
- * `Location.search` saw a truthy-but-empty Map and got `availability: 0` for every variant.
- * A rejected build clears the cache so the next request retries.
+ * Fulfillment locations by region, in priority order. A per-worker memo bounded by expiry
+ * (lib/lookup.js). It holds the promise of the build, never a half-filled Map: caching the
+ * Map once gave requests that arrived during the first scan `availability: 0` everywhere.
  */
-let locationsByRegion = null;
-function loadLocations() {
-	if (!locationsByRegion) {
-		locationsByRegion = (async () => {
-			const byRegion = new Map();
-			for await (const location of Location.search({})) {
-				if (!byRegion.has(location.region)) byRegion.set(location.region, []);
-				byRegion.get(location.region).push(location);
-			}
-			for (const list of byRegion.values()) list.sort((a, b) => a.priority - b.priority);
-			return byRegion;
-		})().catch((error) => {
-			locationsByRegion = null;
-			throw error;
-		});
+const loadLocations = lookupTable(async () => {
+	const byRegion = new Map();
+	for await (const location of Location.search({})) {
+		if (!byRegion.has(location.region)) byRegion.set(location.region, []);
+		byRegion.get(location.region).push(location);
 	}
-	return locationsByRegion;
-}
+	for (const list of byRegion.values()) list.sort((a, b) => a.priority - b.priority);
+	return byRegion;
+});
 
 /**
  * Assemble one product view. This is the expensive path — the whole point of the cache is
