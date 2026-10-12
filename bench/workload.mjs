@@ -25,6 +25,8 @@ import { REGION_WEIGHTS, TIER_WEIGHTS, skewedIndex, weightedPick } from '@ecomme
  * dataset would remove even that; tracked in docs/plan.md.
  */
 export async function sampleIds(datasetDir, table, field, limit, totalRows) {
+	// A missing count would silently take every row — 31M inventory ids into a 1 GiB generator.
+	if (!Number.isInteger(totalRows) || totalRows <= 0) throw new Error(`${table}: the manifest gives no row count`);
 	// The k-th sample is row floor(k * totalRows / limit), so the samples span the whole table.
 	// An integer stride of floor(totalRows / limit) filled `limit` samples before the table
 	// ended and left the tail unreachable: 37% of `dev` inventory (31,802 rows, stride 1), and
@@ -46,7 +48,51 @@ export async function sampleIds(datasetDir, table, field, limit, totalRows) {
 		}
 	}
 	stream.close();
+	if (ids.length !== Math.min(limit, totalRows)) {
+		throw new Error(`${table}: sampled ${ids.length} ids, expected ${Math.min(limit, totalRows)}; the manifest row count is wrong`);
+	}
 	return ids;
+}
+
+/**
+ * The background writer's keys, derived FROM the read sample: the variants of each sampled
+ * product, and the inventory rows of those variants, grouped by the product's rank.
+ *
+ * WRITE-001 requires writes within the read path's working set. Sampling variants and
+ * inventory with their own strides, independently of products, put three quarters of the
+ * write mass at `bench` on products no read ever requested — variants per product vary, so
+ * the strides drift apart. Drawing a product rank with the same skew the reads use, then a
+ * variant or inventory row of THAT product, makes the hot writes land on the hot reads. (Carts
+ * are built from the same skewed products, so quote lines follow too.)
+ */
+export async function writeKeys(datasetDir, productIds) {
+	const rankOf = new Map(productIds.map((id, rank) => [id, rank]));
+	const skusByRank = productIds.map(() => []);
+	const rankOfSku = new Map();
+	for await (const line of createInterface({ input: createReadStream(join(datasetDir, 'variant.ndjson')), crlfDelay: Infinity })) {
+		if (!line) continue;
+		const variant = JSON.parse(line);
+		const rank = rankOf.get(variant.productId);
+		if (rank === undefined) continue;
+		skusByRank[rank].push(variant.sku);
+		rankOfSku.set(variant.sku, rank);
+	}
+	const inventoryByRank = productIds.map(() => []);
+	// Inventory is the largest table; only rows naming a collected sku are parsed in full.
+	const SKU = /"sku":"([^"]+)"/;
+	for await (const line of createInterface({ input: createReadStream(join(datasetDir, 'inventory.ndjson')), crlfDelay: Infinity })) {
+		const rank = rankOfSku.get(SKU.exec(line)?.[1]);
+		if (rank === undefined) continue;
+		inventoryByRank[rank].push(JSON.parse(line).id);
+	}
+	const missing = skusByRank.findIndex((skus) => skus.length === 0);
+	if (missing !== -1) throw new Error(`sampled product ${productIds[missing]} has no variants`);
+	return {
+		skusByRank,
+		inventoryByRank,
+		skus: rankOfSku.size,
+		inventory: inventoryByRank.reduce((sum, ids) => sum + ids.length, 0),
+	};
 }
 
 /**
@@ -97,7 +143,7 @@ export function makeRequestFactory({ baseUrl, cartIds, productIds, quoteShare = 
  * of truth: a read-only workload lets a cache fill once and never invalidate, which is not
  * a cache any real store operates.
  */
-export function makeWriterFactory({ baseUrl, skus, inventoryIds, seed = 7 }) {
+export function makeWriterFactory({ baseUrl, keys, seed = 7 }) {
 	let state = seed >>> 0;
 	const next = () => {
 		state = (state + 0x6d2b79f5) >>> 0;
@@ -115,25 +161,29 @@ export function makeWriterFactory({ baseUrl, skus, inventoryIds, seed = 7 }) {
 	 * for the same reason; this is the same work on the other architecture.
 	 */
 	return function nextWrite() {
-		// Alternate price and inventory writes; both are in the read path's working set.
-		// Writes target the SAME hot set the reads do — WRITE-001 requires the writer to work
-		// within the read path's working set. A uniform writer would mostly invalidate cold
-		// keys nobody asks for, so coherence would cost nothing and measure nothing.
-		if (next() < 0.5) {
-			const sku = skus[skewedIndex(next(), skus.length)];
+		// Writes target the SAME hot products the reads do — WRITE-001 requires the writer to
+		// work within the read path's working set. A uniform writer would mostly invalidate cold
+		// keys nobody asks for, so coherence would cost nothing and measure nothing. Four draws
+		// on every call, whichever branch, so the sequence never depends on the data.
+		const rank = skewedIndex(next(), keys.skusByRank.length);
+		const priceWrite = next() < 0.5;
+		const pick = next();
+		const value = next();
+		const inventory = keys.inventoryByRank[rank];
+		if (priceWrite || inventory.length === 0) {
+			const skus = keys.skusByRank[rank];
 			return {
-				url: `${baseUrl}/admin/variant/${encodeURIComponent(sku)}`,
-				body: { basePrice: 500 + Math.floor(next() * 40000) },
+				url: `${baseUrl}/admin/variant/${encodeURIComponent(skus[Math.floor(pick * skus.length)])}`,
+				body: { basePrice: 500 + Math.floor(value * 40000) },
 			};
 		}
-		// Inventory ids are sampled from the table rather than synthesized. Synthesizing
+		// Inventory ids come from the table rather than being synthesized. Synthesizing
 		// `${sku}:loc-us-east-0` named a nonexistent record for most SKUs — a SKU is stocked at
 		// only some locations — so those writes were skipped, and they never touched three of
 		// the four regions the read path reads.
-		const id = inventoryIds[skewedIndex(next(), inventoryIds.length)];
 		return {
-			url: `${baseUrl}/admin/inventory/${encodeURIComponent(id)}`,
-			body: { onHand: Math.floor(next() * 400) },
+			url: `${baseUrl}/admin/inventory/${encodeURIComponent(inventory[Math.floor(pick * inventory.length)])}`,
+			body: { onHand: Math.floor(value * 400) },
 		};
 	};
 }
