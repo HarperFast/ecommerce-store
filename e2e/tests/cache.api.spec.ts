@@ -50,12 +50,15 @@ test.describe('caching', () => {
 		expect(body.variants.find((v: { sku: string }) => v.sku === sku).basePrice).toBe(54321);
 	});
 
-	test(covers('OBS-001', 'OBS-003')('Server-Timing decomposes data access and total'), async ({ request }) => {
-		const response = await request.get(get('product-000014', 'gold', 'apac'));
-		const timing = response.headers()['server-timing'];
-		expect(timing, 'Server-Timing must be present').toBeTruthy();
-		expect(timing, 'data-access phase').toMatch(/data;dur=[\d.]+/);
-		expect(timing, 'total').toMatch(/total;dur=[\d.]+/);
-		expect(timing, 'cache status').toMatch(/cache;desc=(hit|miss)/);
+	test(covers('OBS-001', 'OBS-003')('Server-Timing decomposes data access, compute and total, on a miss and a hit'), async ({ request }) => {
+		const url = get('product-000014', 'gold', 'apac');
+		for (const response of [await request.get(url), await request.get(url)]) {
+			const timing = response.headers()['server-timing'];
+			expect(timing, 'Server-Timing must be present').toBeTruthy();
+			expect(timing, 'data-access phase').toMatch(/data;dur=[\d.]+/);
+			expect(timing, 'compute phase').toMatch(/compute;dur=[\d.]+/);
+			expect(timing, 'total').toMatch(/total;dur=[\d.]+/);
+			expect(timing, 'cache status').toMatch(/cache;desc=(hit|miss)/);
+		}
 	});
 });

@@ -11,7 +11,7 @@
  * a separated stack does with Redis, and the comparison is about what keeping it coherent
  * costs, not about who remembered to cache (SPEC.md#caching).
  */
-import { Resource } from 'harper';
+import { RequestTarget, Resource, tables } from 'harper';
 import { resolveUnitPrice } from './lib/pricing.js';
 
 const { Product, Variant, Inventory, Location, ProductView } = tables;
@@ -52,38 +52,56 @@ function loadLocations() {
 /**
  * Assemble one product view. This is the expensive path — the whole point of the cache is
  * that it runs on a miss, not on a request.
+ *
+ * Reads and computation are separated so the request that ran the assembly can report both
+ * phases (OBS-001): every read is issued and awaited first, then the view is computed from
+ * what was read.
  */
 async function assemble(productId, tier, region) {
-	const row = await Product.get(productId);
+	const started = process.hrtime.bigint();
+	let dataNs = 0n;
+	const timed = async (read) => {
+		const t0 = process.hrtime.bigint();
+		try {
+			return await read();
+		} finally {
+			dataNs += process.hrtime.bigint() - t0;
+		}
+	};
+
+	const row = await timed(() => Product.get(productId));
 	if (!row) return null;
 
-	const locationIds = ((await loadLocations()).get(region) ?? []).map((l) => l.id);
-
-	const variants = [];
-	for await (const variant of Variant.search({ conditions: [{ attribute: 'productId', value: productId }] })) {
-		variants.push(variant);
-	}
+	const [locations, variants] = await timed(async () => {
+		const found = [];
+		for await (const variant of Variant.search({ conditions: [{ attribute: 'productId', value: productId }] })) {
+			found.push(variant);
+		}
+		return [await loadLocations(), found];
+	});
 	// Sorted: Harper's scan order is not guaranteed, and an unordered variant array would make
 	// two identical requests return different bytes from the same data.
 	variants.sort((a, b) => (a.sku < b.sku ? -1 : a.sku > b.sku ? 1 : 0));
+	const locationIds = (locations.get(region) ?? []).map((l) => l.id);
 
 	// Inventory per variant per location in the requested region, and related products.
 	// Issued together: related ids come from the product row already read, so they do not
 	// depend on inventory, and awaiting inventory first serialized two independent waves.
+	const [inventory, related] = await timed(() =>
+		Promise.all([
+			Promise.all(variants.map((variant) => Promise.all(locationIds.map((id) => Inventory.get(`${variant.sku}:${id}`))))),
+			Promise.all((row.relatedProductIds ?? []).map((id) => Product.get(id))),
+		])
+	);
+
 	const availability = {};
 	const resolvedPrice = {};
-	const [, related] = await Promise.all([
-		Promise.all(
-			variants.map(async (variant) => {
-				resolvedPrice[variant.sku] = resolveUnitPrice(variant.basePrice, tier);
-				const rows = await Promise.all(locationIds.map((id) => Inventory.get(`${variant.sku}:${id}`)));
-				availability[variant.sku] = rows.reduce((sum, r) => sum + (r?.onHand ?? 0), 0);
-			})
-		),
-		Promise.all((row.relatedProductIds ?? []).map((id) => Product.get(id))).then((rows) => rows.filter(Boolean)),
-	]);
+	variants.forEach((variant, i) => {
+		resolvedPrice[variant.sku] = resolveUnitPrice(variant.basePrice, tier);
+		availability[variant.sku] = inventory[i].reduce((sum, r) => sum + (r?.onHand ?? 0), 0);
+	});
 
-	return {
+	const payload = {
 		product: {
 			id: row.id, title: row.title, categoryIds: row.categoryIds,
 			weight: row.weight, relatedProductIds: row.relatedProductIds, reviewRollup: row.reviewRollup,
@@ -93,27 +111,37 @@ async function assemble(productId, tier, region) {
 		})),
 		availability,
 		resolvedPrice,
-		related: related.map((p) => ({ id: p.id, title: p.title, reviewRollup: p.reviewRollup })),
+		related: related.filter(Boolean).map((p) => ({ id: p.id, title: p.title, reviewRollup: p.reviewRollup })),
 		tier,
 		region,
 	};
+	return { payload, computeNs: process.hrtime.bigint() - started - dataNs };
 }
 
 /**
- * The cache fill. Harper calls this on a miss or after expiry; the result is stored in
- * `ProductView` and served directly until invalidated or expired.
+ * The cache fill. Harper calls this on a miss or after expiry or invalidation; the result is
+ * stored in `ProductView` and served directly until invalidated or expired. Concurrent misses
+ * on one key share a single fill.
  */
-ProductView.sourcedFrom(
-	class extends Resource {
-		async get() {
-			const [productId, tier, region] = String(this.getId()).split(':');
-			const payload = await assemble(productId, tier, region);
-			if (!payload) return null;
-			return { id: this.getId(), productId, tier, region, payload, assembledAt: Date.now() };
-		}
-	}
-);
+ProductView.sourcedFrom({
+	async get(id, sourceContext) {
+		const [productId, tier, region] = String(id).split(':');
+		const assembled = await assemble(productId, tier, region);
+		if (!assembled) return null;
+		// The request whose miss ran this fill reports its compute phase. The fill runs in its
+		// own context; `requestContext` is the request that triggered it.
+		if (sourceContext?.requestContext) sourceContext.requestContext.productAssemblyComputeNs = assembled.computeNs;
+		return { id, productId, tier, region, payload: assembled.payload };
+	},
+});
 
+/**
+ * Instance-style on purpose. A `static get` override is the documented v5 shape, but in 5.3.2
+ * REST leaves the request's `authorize` flag set for the first table call inside it, so the
+ * `ProductView.get` below was permission-checked as the anonymous caller and answered 401 —
+ * although server-side table reads are documented as trusted. The default static `get`
+ * consumes the flag and asks `allowRead`, which this public endpoint grants.
+ */
 export class product extends Resource {
 	static path = '/product/:id';
 
@@ -122,14 +150,15 @@ export class product extends Resource {
 	}
 
 	async get(target) {
+		const context = this.getContext();
 		const started = process.hrtime.bigint();
-		const startedAtMs = Date.now();
-		const tier = target.get?.('tier') ?? target.tier ?? 'standard';
-		const region = target.get?.('region') ?? target.region ?? 'us-east';
+		const tier = target.get('tier') ?? 'standard';
+		const region = target.get('region') ?? 'us-east';
 
-		const key = viewKey(target.id, tier, region);
-		const cached = await ProductView.get(key);
-		const dataMs = Number(process.hrtime.bigint() - started) / 1e6;
+		const view = new RequestTarget();
+		view.id = viewKey(target.id, tier, region);
+		const cached = await ProductView.get(view);
+		const readNs = process.hrtime.bigint() - started;
 
 		if (!cached?.payload) {
 			const error = new Error('product not found');
@@ -137,16 +166,19 @@ export class product extends Resource {
 			throw error;
 		}
 
-		// A fill stamps `assembledAt`. An entry assembled before this request began was already
-		// resident; one stamped during it was filled by this request. Compared against the
-		// request's own start rather than a derived window, so the signal does not depend on
-		// how long the read took. Reported per response — OBS-002.
-		const hit = cached.assembledAt < startedAtMs;
-		const totalMs = Number(process.hrtime.bigint() - started) / 1e6;
-		this.getContext()?.responseHeaders?.set(
+		// Harper's own cache disposition for this get (OBS-002): `true` when this request ran the
+		// fill. A request that waited on another request's in-flight fill of the same key is
+		// served from the cache and reports a hit — it assembled nothing.
+		const miss = view.loadedFromSource === true;
+		const assemblyComputeNs = miss ? (context?.productAssemblyComputeNs ?? 0n) : 0n;
+		const totalNs = process.hrtime.bigint() - started;
+		const dataNs = readNs - assemblyComputeNs;
+		context?.responseHeaders?.set(
 			'Server-Timing',
-			`cache;desc=${hit ? 'hit' : 'miss'}, data;dur=${dataMs.toFixed(2)}, total;dur=${totalMs.toFixed(2)}`
+			`cache;desc=${miss ? 'miss' : 'hit'}, data;dur=${ms(dataNs)}, compute;dur=${ms(totalNs - dataNs)}, total;dur=${ms(totalNs)}`
 		);
 		return cached.payload;
 	}
 }
+
+const ms = (ns) => (Number(ns) / 1e6).toFixed(2);
