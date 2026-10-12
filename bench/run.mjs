@@ -26,6 +26,7 @@
  *   node bench/run.mjs --rates 50,100,200,400 --duration 20
  */
 import { writeFile, mkdir, readFile } from 'node:fs/promises';
+import { Agent, request as httpRequest } from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { join } from 'node:path';
@@ -131,6 +132,40 @@ const SATURATION_SHARE = 0.95;
  */
 const READ_HEADERS = { 'accept-encoding': 'identity' };
 const WRITE_HEADERS = { 'accept-encoding': 'identity', 'content-type': 'application/json' };
+/**
+ * A fixed pool of keep-alive connections, all opened before the warm-up, used in rotation.
+ *
+ * fetch opened connections only as concurrency demanded, and reused the most recent free one,
+ * so at ladder concurrency a handful of connections carried the run. A target whose worker
+ * threads share a port by SO_REUSEPORT gets each connection pinned to one worker by the kernel:
+ * measured on Harper with two workers, one did twice the other's work, and the busier one
+ * saturates while the other idles. Real traffic arrives on many connections. A single-process
+ * target is indifferent to this, so the policy is neutral; it is recorded with the run.
+ */
+const CONNECTIONS = Number(argOf('connections', '32'));
+const agent = new Agent({ keepAlive: true, maxSockets: CONNECTIONS, scheduling: 'fifo' });
+
+/** One HTTP exchange on the pool. The body is counted, and kept only when asked for. */
+function send(url, { method = 'GET', headers, body, signal, keepBody = false }) {
+	return new Promise((resolve, reject) => {
+		const outgoing = httpRequest(
+			url,
+			{ method, agent, signal, headers: body === undefined ? headers : { ...headers, 'content-length': Buffer.byteLength(body) } },
+			(response) => {
+				let bytes = 0;
+				const chunks = keepBody ? [] : null;
+				response.on('data', (chunk) => {
+					bytes += chunk.length;
+					chunks?.push(chunk);
+				});
+				response.on('end', () => resolve({ status: response.statusCode, headers: response.headers, bytes, body: chunks && Buffer.concat(chunks) }));
+				response.on('error', reject);
+			}
+		);
+		outgoing.on('error', reject);
+		outgoing.end(body);
+	});
+}
 
 // Nearest-rank. The Math.max guards q=0, which would otherwise index -1.
 const quantile = (sorted, q) =>
@@ -169,28 +204,19 @@ async function step({ rate, seconds, nextRequest, nextWrite, writeRate, label })
 	const issue = async (request) => {
 		const t0 = performance.now();
 		try {
-			const response = await fetch(request.url, {
+			// The body is read to completion WITHOUT being retained. Abandoning it would destroy
+			// the socket rather than return it to the pool, so every request would pay TCP setup;
+			// it would also end the sample at headers, counting a truncated response as a success
+			// and understating latency for any slow body.
+			const response = await send(request.url, {
 				signal: abort.signal,
 				method: request.method,
 				headers: request.method === 'POST' ? WRITE_HEADERS : READ_HEADERS,
 				body: request.method === 'POST' ? '{}' : undefined,
 			});
-			// Stream the body to completion WITHOUT retaining it. Cancelling the stream
-			// instead destroys the socket rather than returning it to the keep-alive pool, so
-			// every request paid TCP setup and the run measured connection churn; it also
-			// ended the sample at headers, counting a truncated response as a success and
-			// understating latency for any slow body.
-			const serverTiming = response.headers.get('server-timing') ?? null;
-			if (response.headers.get('content-encoding')) encodedResponses++;
-			let bytes = 0;
-			if (response.body) {
-				const reader = response.body.getReader();
-				try {
-					for (let chunk; !(chunk = await reader.read()).done; ) bytes += chunk.value.byteLength;
-				} finally {
-					reader.releaseLock();
-				}
-			}
+			const serverTiming = response.headers['server-timing'] ?? null;
+			if (response.headers['content-encoding']) encodedResponses++;
+			const bytes = response.bytes;
 			const doneAt = performance.now();
 			samples.push({
 				kind: request.kind,
@@ -231,17 +257,17 @@ async function step({ rate, seconds, nextRequest, nextWrite, writeRate, label })
 
 	const postWrite = async (write) => {
 		try {
-			const response = await fetch(write.url, {
+			const response = await send(write.url, {
 				method: 'POST',
 				headers: WRITE_HEADERS,
 				body: JSON.stringify(write.body),
 				signal: AbortSignal.any([abort.signal, AbortSignal.timeout(WRITE_TIMEOUT_MS)]),
+				keepBody: true,
 			});
-			const result = await response.json();
 			// Writes are not timed, but they must be COUNTED — a run whose writes all failed is
 			// not the run it claims to be. A write that never completes counts as failed.
-			if (!response.ok) writeFailures++;
-			else invalidations += result.invalidated ?? 0;
+			if (response.status < 200 || response.status >= 300) writeFailures++;
+			else invalidations += JSON.parse(response.body.toString()).invalidated ?? 0;
 		} catch {
 			writeFailures++;
 		}
@@ -465,7 +491,7 @@ async function writeRecord(warm, steps, complete) {
 						arrivals: 'deterministic, evenly spaced, dispatched on a 2 ms tick',
 						seeds: { requests: REQUEST_SEED, writes: WRITE_SEED },
 						requestHeaders: READ_HEADERS,
-						connections: 'fetch default dispatcher (undici keep-alive pool, connections opened on demand)',
+						connections: `${CONNECTIONS} keep-alive connections, opened before the warm-up, used least-recently-used first`,
 						keySampling: 'stride across full tables',
 						writeKeys: 'variants and inventory of the sampled products',
 						reachableKeys: { carts: cartIds.length, products: productIds.length, writeSkus: keys.skus, writeInventory: keys.inventory },
@@ -489,6 +515,14 @@ async function writeRecord(warm, steps, complete) {
 		)
 	);
 }
+
+// Open the whole pool before anything is measured: one concurrent request per connection.
+await Promise.all(
+	Array.from({ length: CONNECTIONS }, (_, i) =>
+		send(`${BASE_URL}/product/${encodeURIComponent(productIds[i % productIds.length])}?tier=standard&region=us-east`, { headers: READ_HEADERS })
+	)
+);
+console.log(`opened ${CONNECTIONS} connections`);
 
 // COLD is measured by the caller restarting the target; this harness reports the first
 // observation of the warm-up step separately so the number is not silently lost.

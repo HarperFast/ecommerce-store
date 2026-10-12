@@ -45,6 +45,7 @@ A run retains per-request samples and conditions in `bench/results/run-<timestam
 | Background writes | Update inventory and prices through the application's write surface, exercising invalidation as well as reads. Write keys are the variants and inventory of the sampled products, drawn with the reads' skew, so writes land on what is read (`WRITE-001`). Each write times out after 30 s and counts as failed. |
 | Access skew | Share the dataset's hot-key distribution; weight tier and region to the seeded customer population. |
 | Cache behavior | Record the product endpoint's cache-hit rate (the quote is never cacheable) and the write surface's reported invalidations. Flag a zero hit rate, which may indicate the caching shortcut forbidden by `WRITE-003`. |
+| Connection pool | 32 keep-alive connections opened before the warm-up and used least-recently-used first (`--connections`). Few connections pin a multi-threaded target's work to the workers the kernel assigned them. |
 | No compression | Request `accept-encoding: identity` and count encoded responses; any fails verification. |
 | Partial records | Rewrite the run record after every step, so a generator that dies keeps the steps it finished (`complete: false`). |
 
