@@ -26,10 +26,18 @@ Selectivity depends on the corpus. Most promotions target a tier, category, or S
 |---|---|
 | Embedded cart lines | One read yields the cart; per-line reads form the next wave. A normalized implementation may split them but must document the mapping (`DATA-001`). |
 | Inventory key `sku:locationId` | Allows bounded direct reads for availability. |
+| Indexes only where queried | `Variant.productId` and the promotion eligibility keys. Every other read is by primary key or a scan of a small lookup table; an unqueried index costs every load, write, and byte of storage. |
 | `@export` on the eight entities | Provides the admin and seeding surface. This is a qualitative implementation advantage, not a measured P0 endpoint. |
 | `ProductView` derived cache | Stores the resolved aggregate under product × tier × region. Deleting it changes latency, not response content (`CACHE-001`). |
 
 `ProductView` uses a `sourcedFrom` resolver, explicit invalidation on writes, and an expiration backstop. It is internal and not exported; requests use the product endpoint so cache status can be reported. See the [schema](../schemas/store.graphql) and [product handler](../resources/product.js) for fields and cache configuration.
+
+Two rules keep it coherent under concurrency:
+
+- **Invalidate after the write commits.** Harper orders writes to a key by transaction start time. An invalidation staged in the write's own transaction carries that start time, so a fill that read the old row before the commit could outrank it and cache the old value until expiry. The admin surface commits, then invalidates in the next transaction; [verify-coherence.mjs](../scripts/verify-coherence.mjs) checks it with readers racing writers.
+- **Cache status is Harper's `loadedFromSource`.** `miss` means this request ran the fill. A request that waited on another request's in-flight fill of the same key reports `hit`.
+
+Per-worker memos of the location and rate tables expire after 500 ms, half of `FRESH_MS` ([lookup.js](../resources/lib/lookup.js)), so a write to either reaches quotes within the budget.
 
 ## Open
 
