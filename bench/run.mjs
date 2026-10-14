@@ -31,8 +31,9 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { join } from 'node:path';
 import { cpus, totalmem, platform, release } from 'node:os';
-import { makeRequestFactory, makeWriterFactory, sampleIds, writeKeys } from './workload.mjs';
+import { makeRequestFactory, makeWriterFactory, planWrites, sampleIds, writeKeys } from './workload.mjs';
 import { accountStep, readAll, resolveCgroups } from './cgroups.mjs';
+import { ACCESS_SKEW, SCRAMBLE_SEED } from '@ecommerce-store/spec';
 
 const execFileAsync = promisify(execFile);
 
@@ -72,8 +73,6 @@ const WARMUP = Number(argOf('warmup', '10'));
 const QUOTE_SHARE = Number(argOf('quote-share', '0.5'));
 const WRITE_RATE = Number(argOf('write-rate', '20'));
 const OUT = argOf('out', join(import.meta.dirname, 'results'));
-/** Keys sampled per table for the read path; write keys are derived from the product sample. */
-const SAMPLE_LIMIT = 20_000;
 /**
  * Ceiling on concurrent in-flight READS.
  *
@@ -419,21 +418,45 @@ const manifest = JSON.parse(await readFile(join(DATASET, 'MANIFEST.json'), 'utf8
 console.log(`target ${BASE_URL} · dataset scale ${manifest.scale} seed ${manifest.seed}`);
 console.log(`${cpus().length} cpus · ${(totalmem() / 1024 ** 3).toFixed(1)} GiB · ${platform()} ${release()}\n`);
 
-// Sampled across each full table, so the reachable working set spans the whole catalog rather
-// than its first 20,000 rows. Row counts come from the manifest. Write keys are derived from
-// the product sample so writes land on what is read (WRITE-001).
+// Every cart and every product id is reachable: a sample of 20,000 per table kept the `bench`
+// working set inside the target's memory, so DATA-004 could not hold. Row counts come from the
+// manifest. The write stream is planned up front from the product draws, so only the planned
+// products' variants and inventory are loaded (WRITE-001).
 const rows = manifest.files;
-console.log('sampling workload keys across the full dataset…');
+console.log('loading every cart and product id…');
 const [cartIds, productIds] = await Promise.all([
-	sampleIds(DATASET, 'cart', 'id', SAMPLE_LIMIT, rows.cart?.rows),
-	sampleIds(DATASET, 'product', 'id', SAMPLE_LIMIT, rows.product?.rows),
+	sampleIds(DATASET, 'cart', 'id', rows.cart?.rows, rows.cart?.rows),
+	sampleIds(DATASET, 'product', 'id', rows.product?.rows, rows.product?.rows),
 ]);
-const keys = await writeKeys(DATASET, productIds);
 
 const REQUEST_SEED = 1;
 const WRITE_SEED = 7;
+// Exactly the writes the warm-up and the ladder will issue.
+const plannedWrites = [WARMUP, ...RATES.map(() => DURATION)].reduce((sum, seconds) => sum + Math.round(WRITE_RATE * seconds), 0);
+const plan = planWrites({ productCount: productIds.length, total: Math.max(1, plannedWrites), seed: WRITE_SEED });
+const keys = await writeKeys(DATASET, [...new Set(plan.map((write) => productIds[write.productIndex]))]);
 const nextRequest = makeRequestFactory({ baseUrl: BASE_URL, cartIds, productIds, quoteShare: QUOTE_SHARE, seed: REQUEST_SEED });
-const nextWrite = makeWriterFactory({ baseUrl: BASE_URL, keys, seed: WRITE_SEED });
+const nextWrite = makeWriterFactory({ baseUrl: BASE_URL, plan, productIds, keys });
+
+/**
+ * The generator's own memory, measured: it holds every cart and product id and must stay
+ * inside its 1 GiB. Peak RSS is sampled after setup and after every step; the container's
+ * cgroup high-water mark is read when the cgroup exposes it.
+ */
+const generatorMemory = { rssPeakBytes: 0, heapUsedPeakBytes: 0, cgroupPeakBytes: null, cgroupLimitBytes: null };
+async function sampleGeneratorMemory() {
+	const usage = process.memoryUsage();
+	generatorMemory.rssPeakBytes = Math.max(generatorMemory.rssPeakBytes, usage.rss);
+	generatorMemory.heapUsedPeakBytes = Math.max(generatorMemory.heapUsedPeakBytes, usage.heapUsed);
+	for (const [field, file] of [['cgroupPeakBytes', 'memory.peak'], ['cgroupLimitBytes', 'memory.max']]) {
+		try {
+			const value = Number((await readFile(`/sys/fs/cgroup/${file}`, 'utf8')).trim());
+			if (Number.isFinite(value)) generatorMemory[field] = value;
+		} catch {}
+	}
+}
+await sampleGeneratorMemory();
+console.log(`keys: ${cartIds.length} carts, ${productIds.length} products; ${plan.length} planned writes over ${keys.products} products; generator RSS ${(generatorMemory.rssPeakBytes / 2 ** 20).toFixed(0)} MiB`);
 const cgroups = await resolveCgroups(TARGET_CGROUPS);
 for (const cgroup of cgroups) {
 	console.log(`target cgroup ${cgroup.name}: ${cgroup.dir ?? `UNRESOLVED (${cgroup.ref}) — target CPU will be null`}`);
@@ -492,9 +515,11 @@ async function writeRecord(warm, steps, complete) {
 						seeds: { requests: REQUEST_SEED, writes: WRITE_SEED },
 						requestHeaders: READ_HEADERS,
 						connections: `${CONNECTIONS} keep-alive connections, opened before the warm-up, used least-recently-used first`,
-						keySampling: 'stride across full tables',
-						writeKeys: 'variants and inventory of the sampled products',
-						reachableKeys: { carts: cartIds.length, products: productIds.length, writeSkus: keys.skus, writeInventory: keys.inventory },
+						keySampling: 'every key of every table',
+						accessDistribution: { form: 'scrambled discrete Zipf', exponent: ACCESS_SKEW.exponent, scrambleSeed: SCRAMBLE_SEED },
+						writeKeys: 'planned from product draws with the read distribution; variants and inventory of those products',
+						reachableKeys: { carts: cartIds.length, products: productIds.length, writeProducts: keys.products, writeSkus: keys.skus, writeInventory: keys.inventory },
+						generatorMemory,
 						targetCgroups: cgroups,
 						targetCpu: cgroups.length ? 'cgroup v2 cpu.stat usage_usec, offer start to drain end' : null,
 						cacheHitRate: 'product responses only',
@@ -543,6 +568,7 @@ for (const rate of RATES) {
 	Object.assign(result, accountStep(cgroups, cgroupsBefore, cgroupsAfter));
 	result.targetCpuLoad = result.targetCpuSeconds === null ? null : result.targetCpuSeconds / ((result.drainEndEpochMs - result.startedAtEpochMs) / 1000);
 	steps.push(result);
+	await sampleGeneratorMemory();
 	await writeRecord(warm, steps, false);
 
 	let flag = result.generatorCpuLoad > 0.8 ? '  ⚠ GENERATOR saturated — not a target measurement' : '';

@@ -7,7 +7,7 @@
 import { createReadStream } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
-import { REGION_WEIGHTS, TIER_WEIGHTS, skewedIndex, weightedPick } from '@ecommerce-store/spec';
+import { REGION_WEIGHTS, TIER_WEIGHTS, weightedPick, zipfIndex } from '@ecommerce-store/spec';
 
 /**
  * Sample ids SPREAD ACROSS the whole table, not a prefix.
@@ -55,43 +55,67 @@ export async function sampleIds(datasetDir, table, field, limit, totalRows) {
 }
 
 /**
- * The background writer's keys, derived FROM the read sample: the variants of each sampled
- * product, and the inventory rows of those variants, grouped by the product's rank.
+ * The deterministic PRNG the harness uses for its own streams (mulberry32): two runs with the
+ * same seed issue the same sequence, so runs can be diffed.
+ */
+function stream(seed) {
+	let state = seed >>> 0;
+	return () => {
+		state = (state + 0x6d2b79f5) >>> 0;
+		let t = state;
+		t = Math.imul(t ^ (t >>> 15), t | 1);
+		t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+		return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+	};
+}
+
+/**
+ * Plan the whole background write stream up front: which product each write lands on, whether
+ * it is a price or an inventory write, and its draws.
  *
- * WRITE-001 requires writes within the read path's working set. Sampling variants and
- * inventory with their own strides, independently of products, put three quarters of the
- * write mass at `bench` on products no read ever requested — variants per product vary, so
- * the strides drift apart. Drawing a product rank with the same skew the reads use, then a
- * variant or inventory row of THAT product, makes the hot writes land on the hot reads. (Carts
- * are built from the same skewed products, so quote lines follow too.)
+ * WRITE-001 requires writes within the read path's working set, so a write draws its product
+ * with the SAME scrambled Zipf the product reads use — the hot writes land on the hot reads,
+ * and carts are built from the same products, so quote lines follow too. The stream is
+ * deterministic, so planning it first lets the harness load the variants and inventory of only
+ * the few thousand products it will write, instead of 6.5M SKUs and 31M inventory ids that
+ * would not fit in the generator's 1 GiB. Four draws per write, whichever branch.
+ */
+export function planWrites({ productCount, total, seed = 7 }) {
+	const next = stream(seed);
+	const plan = [];
+	for (let i = 0; i < total; i++) {
+		plan.push({ productIndex: zipfIndex(next(), productCount), priceWrite: next() < 0.5, pick: next(), value: next() });
+	}
+	return plan;
+}
+
+/**
+ * The variants of the planned products, and the inventory rows of those variants. One pass
+ * over each table; inventory, the largest, is parsed in full only for rows naming a wanted sku.
  */
 export async function writeKeys(datasetDir, productIds) {
-	const rankOf = new Map(productIds.map((id, rank) => [id, rank]));
-	const skusByRank = productIds.map(() => []);
-	const rankOfSku = new Map();
+	const wanted = new Set(productIds);
+	const byProduct = new Map([...wanted].map((id) => [id, { skus: [], inventory: [] }]));
+	const productOfSku = new Map();
 	for await (const line of createInterface({ input: createReadStream(join(datasetDir, 'variant.ndjson')), crlfDelay: Infinity })) {
 		if (!line) continue;
 		const variant = JSON.parse(line);
-		const rank = rankOf.get(variant.productId);
-		if (rank === undefined) continue;
-		skusByRank[rank].push(variant.sku);
-		rankOfSku.set(variant.sku, rank);
+		const keys = byProduct.get(variant.productId);
+		if (!keys) continue;
+		keys.skus.push(variant.sku);
+		productOfSku.set(variant.sku, keys);
 	}
-	const inventoryByRank = productIds.map(() => []);
-	// Inventory is the largest table; only rows naming a collected sku are parsed in full.
 	const SKU = /"sku":"([^"]+)"/;
 	for await (const line of createInterface({ input: createReadStream(join(datasetDir, 'inventory.ndjson')), crlfDelay: Infinity })) {
-		const rank = rankOfSku.get(SKU.exec(line)?.[1]);
-		if (rank === undefined) continue;
-		inventoryByRank[rank].push(JSON.parse(line).id);
+		const keys = productOfSku.get(SKU.exec(line)?.[1]);
+		if (keys) keys.inventory.push(JSON.parse(line).id);
 	}
-	const missing = skusByRank.findIndex((skus) => skus.length === 0);
-	if (missing !== -1) throw new Error(`sampled product ${productIds[missing]} has no variants`);
+	for (const [id, keys] of byProduct) if (keys.skus.length === 0) throw new Error(`product ${id} has no variants`);
 	return {
-		skusByRank,
-		inventoryByRank,
-		skus: rankOfSku.size,
-		inventory: inventoryByRank.reduce((sum, ids) => sum + ids.length, 0),
+		byProduct,
+		products: byProduct.size,
+		skus: productOfSku.size,
+		inventory: [...byProduct.values()].reduce((sum, keys) => sum + keys.inventory.length, 0),
 	};
 }
 
@@ -104,32 +128,22 @@ export async function writeKeys(datasetDir, productIds) {
  * fan-out cost, and it is recorded with every run.
  */
 export function makeRequestFactory({ baseUrl, cartIds, productIds, quoteShare = 0.5, seed = 1 }) {
-	// The harness has its own deterministic stream so two runs issue the same request
-	// sequence. A run that cannot be repeated cannot be diffed.
-	let state = seed >>> 0;
-	const next = () => {
-		state = (state + 0x6d2b79f5) >>> 0;
-		let t = state;
-		t = Math.imul(t ^ (t >>> 15), t | 1);
-		t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-		return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-	};
+	const next = stream(seed);
 
 	/**
-	 * Keys are drawn SKEWED, from the same distribution the dataset was built against, and
-	 * tier/region are weighted rather than uniform.
+	 * Keys are drawn from EVERY cart and product, with the scrambled Zipf the dataset was built
+	 * against, and tier/region are weighted rather than uniform.
 	 *
-	 * Uniform draws over 20,000 products x 4 tiers x 4 regions is a 320,000-key space that a
-	 * short run almost never revisits — measured cache hit rate was 2.5%. A cache nobody asks
-	 * twice is a cache the benchmark cannot measure, and neither is the coherence cost of
-	 * invalidating it.
+	 * Uniform draws make a cache that is almost never asked twice; a 20,000-key sample made a
+	 * working set that fit in the target's memory, so DATA-004 could not hold. The whole key
+	 * space, skewed, gives both a hot set and a cold tail larger than memory.
 	 */
 	return function nextRequest() {
 		if (next() < quoteShare) {
-			const id = cartIds[skewedIndex(next(), cartIds.length)];
+			const id = cartIds[zipfIndex(next(), cartIds.length)];
 			return { kind: 'quote', method: 'POST', url: `${baseUrl}/cart/${id}/quote` };
 		}
-		const id = productIds[skewedIndex(next(), productIds.length)];
+		const id = productIds[zipfIndex(next(), productIds.length)];
 		const tier = weightedPick(TIER_WEIGHTS, next());
 		const region = weightedPick(REGION_WEIGHTS, next());
 		return { kind: 'product', method: 'GET', url: `${baseUrl}/product/${id}?tier=${tier}&region=${region}` };
@@ -143,15 +157,8 @@ export function makeRequestFactory({ baseUrl, cartIds, productIds, quoteShare = 
  * of truth: a read-only workload lets a cache fill once and never invalidate, which is not
  * a cache any real store operates.
  */
-export function makeWriterFactory({ baseUrl, keys, seed = 7 }) {
-	let state = seed >>> 0;
-	const next = () => {
-		state = (state + 0x6d2b79f5) >>> 0;
-		let t = state;
-		t = Math.imul(t ^ (t >>> 15), t | 1);
-		t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-		return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-	};
+export function makeWriterFactory({ baseUrl, plan, productIds, keys }) {
+	let issued = 0;
 	/**
 	 * Writes go through the APPLICATION, not the operations API.
 	 *
@@ -161,20 +168,12 @@ export function makeWriterFactory({ baseUrl, keys, seed = 7 }) {
 	 * for the same reason; this is the same work on the other architecture.
 	 */
 	return function nextWrite() {
-		// Writes target the SAME hot products the reads do — WRITE-001 requires the writer to
-		// work within the read path's working set. A uniform writer would mostly invalidate cold
-		// keys nobody asks for, so coherence would cost nothing and measure nothing. Four draws
-		// on every call, whichever branch, so the sequence never depends on the data.
-		const rank = skewedIndex(next(), keys.skusByRank.length);
-		const priceWrite = next() < 0.5;
-		const pick = next();
-		const value = next();
-		const inventory = keys.inventoryByRank[rank];
-		if (priceWrite || inventory.length === 0) {
-			const skus = keys.skusByRank[rank];
+		const write = plan[issued++ % plan.length];
+		const { skus, inventory } = keys.byProduct.get(productIds[write.productIndex]);
+		if (write.priceWrite || inventory.length === 0) {
 			return {
-				url: `${baseUrl}/admin/variant/${encodeURIComponent(skus[Math.floor(pick * skus.length)])}`,
-				body: { basePrice: 500 + Math.floor(value * 40000) },
+				url: `${baseUrl}/admin/variant/${encodeURIComponent(skus[Math.floor(write.pick * skus.length)])}`,
+				body: { basePrice: 500 + Math.floor(write.value * 40000) },
 			};
 		}
 		// Inventory ids come from the table rather than being synthesized. Synthesizing
@@ -182,8 +181,8 @@ export function makeWriterFactory({ baseUrl, keys, seed = 7 }) {
 		// only some locations — so those writes were skipped, and they never touched three of
 		// the four regions the read path reads.
 		return {
-			url: `${baseUrl}/admin/inventory/${encodeURIComponent(inventory[Math.floor(pick * inventory.length)])}`,
-			body: { onHand: Math.floor(value * 400) },
+			url: `${baseUrl}/admin/inventory/${encodeURIComponent(inventory[Math.floor(write.pick * inventory.length)])}`,
+			body: { onHand: Math.floor(write.value * 400) },
 		};
 	};
 }

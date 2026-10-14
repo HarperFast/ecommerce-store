@@ -50,6 +50,11 @@ jobs:
       - name: The promotion index never excludes an eligible promotion
         run: npm run check:index
 
+      # The generator and the harness share one access distribution; its head claim is checked
+      # by counting draws, and its scramble by exhausting the key space.
+      - name: The access distribution does what it claims
+        run: npm run check:distribution
+
       # DATA-001/002/003/005 are properties of the committed artifact, not of a request.
       - name: The dataset matches its manifest and is not pre-joined
         run: npm run check:dataset

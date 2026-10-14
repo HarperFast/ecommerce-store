@@ -41,16 +41,38 @@ if (conditions.dataset?.scale !== 'bench') {
 	else fail('DATA-004', message);
 }
 const reachable = conditions.harness?.reachableKeys;
+const tableRows = conditions.dataset?.files ?? {};
 if (!reachable) {
 	fail('DATA-004', 'the record does not state how many keys the workload could reach');
 } else {
 	notes.push(`reachable keys: ${Object.entries(reachable).map(([k, v]) => `${k}=${v}`).join(' ')}`);
 	if (!(reachable.writeSkus > 0 && reachable.writeInventory > 0)) {
-		fail('WRITE-001', 'the record does not show write keys drawn from the products the reads sample');
+		fail('WRITE-001', 'the record does not show write keys drawn from the products the reads draw');
+	}
+	// Evidence, not a label: every cart and product must be reachable. A 20,000-key sample
+	// kept the bench working set inside the target's memory.
+	for (const [key, table] of [['carts', 'cart'], ['products', 'product']]) {
+		if (tableRows[table]?.rows && reachable[key] < tableRows[table].rows) {
+			fail('DATA-004', `${reachable[key]} of ${tableRows[table].rows} ${key} were reachable; a sample bounds the working set`);
+		}
 	}
 }
-if (conditions.harness?.keySampling !== 'stride across full tables') {
-	fail('DATA-004', `key sampling is "${conditions.harness?.keySampling}"; a prefix sample does not establish a working set`);
+// The target must have pressed against its memory budget: with a working set larger than
+// memory, its cgroup (page cache included) fills to the limit. One that never came near it
+// held the whole working set.
+const memoryLimit = conditions.orchestrator?.target?.applied?.memoryBytes;
+const lastStep = steps.at(-1);
+const memoryPeak = lastStep?.targetComponents?.every((c) => c.memoryPeakSinceStartBytes != null)
+	? lastStep.targetComponents.reduce((sum, c) => sum + c.memoryPeakSinceStartBytes, 0)
+	: null;
+if (memoryLimit && memoryPeak !== null) {
+	const share = memoryPeak / memoryLimit;
+	notes.push(`target memory peak ${(memoryPeak / 2 ** 20).toFixed(0)} MiB of ${(memoryLimit / 2 ** 20).toFixed(0)} MiB (${(share * 100).toFixed(0)}%)`);
+	if (conditions.dataset?.scale === 'bench' && share < 0.9) {
+		fail('DATA-004', `the target's memory peaked at ${(share * 100).toFixed(0)}% of its budget; the working set fit in memory`);
+	}
+} else if (conditions.dataset?.scale === 'bench') {
+	fail('DATA-004', 'the record carries no target memory peak against its budget');
 }
 
 // --- WRITE-001 / WRITE-004: the write stream actually ran, at the configured rate --------

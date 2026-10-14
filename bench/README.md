@@ -42,8 +42,9 @@ A run retains per-request samples and conditions in `bench/results/run-<timestam
 | In-flight ceiling | Shed and count read arrivals beyond the ceiling; a shed arrival still consumes its key draw, so the sequence stays identical across targets. Writes are outside the ceiling. |
 | Achieved rate | Successful responses completed *inside* the offer window. A step is `saturated` when it shed arrivals or completed under 95% of the offered rate in the window; its achieved rate is then a floor, not a capacity. |
 | Raw samples | Retain request samples for later distribution and interval analysis. |
-| Background writes | Update inventory and prices through the application's write surface, exercising invalidation as well as reads. Write keys are the variants and inventory of the sampled products, drawn with the reads' skew, so writes land on what is read (`WRITE-001`). Each write times out after 30 s and counts as failed. |
-| Access skew | Share the dataset's hot-key distribution; weight tier and region to the seeded customer population. |
+| Background writes | Update inventory and prices through the application's write surface, exercising invalidation as well as reads. The stream is planned up front with the reads' distribution, so writes land on what is read (`WRITE-001`), and only the planned products' variants and inventory are loaded. Each write times out after 30 s and counts as failed. |
+| Access skew | Draw every cart and product with the dataset's scrambled Zipf; weight tier and region to the seeded customer population. |
+| Generator memory | Record the generator's peak RSS, heap, and container cgroup peak against its limit; it holds every cart and product id. |
 | Cache behavior | Record the product endpoint's cache-hit rate (the quote is never cacheable) and the write surface's reported invalidations. Flag a zero hit rate, which may indicate the caching shortcut forbidden by `WRITE-003`. |
 | Connection pool | 32 keep-alive connections opened before the warm-up and used least-recently-used first (`--connections`). Few connections pin a multi-threaded target's work to the workers the kernel assigned them. |
 | No compression | Request `accept-encoding: identity` and count encoded responses; any fails verification. |
@@ -61,9 +62,7 @@ Dated observations and unresolved behavior belong in [docs/plan.md](../docs/plan
 
 ## Access distribution
 
-Uniform draws over product × tier × region rarely revisit a key during a short run, making cache hits and invalidation costs hard to measure. The shared distribution in `@ecommerce-store/spec` aligns workload and dataset hot products.
-
-Observed hit rates are much lower at `bench` scale than at `dev`. Whether this reflects a cold cache or a hot set too diffuse for the chosen skew remains open.
+Uniform draws over product × tier × region rarely revisit a key during a short run, making cache hits and invalidation costs hard to measure. Too few reachable keys, or too much mass on one, measures a cache that holds everything. The shared distribution in `@ecommerce-store/spec`, stated in [SPEC.md](../SPEC.md#access-distribution), is a discrete Zipf (`s = 0.8845`) over every cart and product, scrambled so hot keys are spread across the id space: the hottest 1% of products take half the draws and the hottest one 2.6%.
 
 ## Generator headroom
 
