@@ -1,6 +1,6 @@
 {
   "specVersion": "0.2.0-draft",
-  "generatorVersion": "0.4.0",
+  "generatorVersion": "0.5.0",
   "scale": "bench",
   "seed": "harper-ecommerce-store-v1",
   "compressed": true,
@@ -34,7 +34,7 @@
       "rows": 22
     },
     "cart": {
-      "sha256": "ac7c02768a8a1f9571cc48515268c5ec2f50a1a671980cb4e0350a78e2cd4686",
+      "sha256": "9822c7897efcc7082ec0b059a04b552c94fb42bcd75326a8e513cf69eb14475e",
       "rows": 300000
     }
   },
@@ -45,10 +45,23 @@
     "tier": "standard 60 / silver 25 / gold 12 / platinum 3",
     "outOfStockRate": 0.12,
     "accessSkew": {
-      "form": "power law over product index",
-      "headShare": 0.01,
-      "headMass": 0.5,
-      "alpha": 6.643856
+      "form": "discrete Zipf over product rank, scrambled to key",
+      "exponent": 0.8845,
+      "solvedFor": {
+        "headShare": 0.01,
+        "headMass": 0.5,
+        "catalogSize": 2000000
+      },
+      "scrambleSeed": "ecommerce-store-scramble-v1",
+      "expected": {
+        "headMass": 0.500066,
+        "topKeyMass": 0.026199
+      },
+      "cartLines": {
+        "lines": 1139139,
+        "headMass": 0.500096,
+        "topKeyMass": 0.025448
+      }
     },
     "requestTierWeights": {
       "standard": 60,
