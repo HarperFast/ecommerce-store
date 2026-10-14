@@ -1,6 +1,6 @@
 # Development plan
 
-**Last updated:** 2026-10-12 · **Spec version:** `0.2.0-draft` · **Harper:** `5.3.2`
+**Last updated:** 2026-10-14 · **Spec version:** `0.2.0-draft` · **Harper:** `5.3.2` · **Dataset generator:** `0.5.0`
 
 This file tracks status, blockers, and observations. [README.md](../README.md) introduces the application. Requirement ids live in [SPEC.md](../SPEC.md) and its registry; coverage comes from `npm run check`; dataset counts and hashes come from each `MANIFEST.json`.
 
@@ -23,12 +23,18 @@ Results are never published from this repo.
 | Write surface | `POST /admin/variant/:sku` and `POST /admin/inventory/:id` write and invalidate. |
 | Endpoints | Quote and product aggregate built and covered by conformance tests. Both emit data, compute, and total. |
 | Background writer | Harness-side only; no in-application writer. |
-| Datasets | `dev` in plain git, `bench` in Git LFS; checksum-verified before loading. |
+| Datasets | Generator `0.5.0`: carts drawn from a scrambled discrete Zipf. `dev` in plain git, `bench` in Git LFS; checksum-verified before loading. |
 | Conformance | Every MUST has declared coverage; execution and assertion gaps remain below. |
 | Harness and containers | Load ladder, 2 CPU / 2 GiB target, snapshot restore with provenance, per-step target CPU from cgroups, run-record verification after every trial, tier-2 placement override. No complete `bench` ladder yet. |
 | CI | Repo checks and conformance on pushes and pull requests; LFS pulled only for dataset changes. Both jobs last recorded passing. |
 
 ## Recent work
+
+- **2026-10-14 — Realistic access, regenerated dataset** (same branch; Ethan approved the regeneration for this change and kept it in one PR):
+  - **Distribution.** A discrete Zipf over rank (`s = 0.8845`, solved so the hottest 1% of the 2,000,000-product catalog takes half the draws), scrambled from rank to key by a seeded Feistel bijection. The hottest product takes 2.6% of draws, not 22.5%, and hot keys are spread across the id space. Stated in [SPEC.md](../SPEC.md#access-distribution); checked by counting draws in `npm run check`.
+  - **Dataset `0.5.0`.** Only `cart` changed; every other table is byte-identical. The measured `bench` cart-line mass is 50.0% on the hottest 1% and 2.54% on the top product. See [regenerations](seed-design.md#regenerations).
+  - **Every key.** The harness draws from all 300,000 carts and 2,000,000 products and plans its writes up front; generator RSS peaked at 238 MiB of its 1 GiB.
+  - **Page cache.** The orchestrator drops the page cache the restore filled before every cold start; it had been serving the target from memory outside its budget.
 
 - **2026-10-12 — Harper 5.3.2 and benchmark readiness** (branch `harper-5.3`):
   - **Upgrade.** Harper 5.2.12 → 5.3.2. The global install fails on `node:24-slim` without Python since 5.3.2 dropped its shrinkwrap, and msgpackr-extract's linux-arm64 prebuilt ships only musl binaries, so on glibc arm64 msgpackr silently decoded in pure JS. **The 5.2.12 image ran that way on every tier-1 run.** The image now compiles it and refuses to build without native acceleration. Install and thread configuration match 5.3.2's deploy path.
@@ -45,10 +51,11 @@ Validation: full `npm run check` passes in this checkout, including deployment s
 
 ## Next
 
-1. **Run `bench`-scale ladders on a clean window, then on tier 2.** One contended trial completed on 2026-10-12 (below). A 5.3.2 `bench` snapshot with provenance exists (`containers/.snapshots/bench-harper-5.3.2.tar.gz` in the main checkout); `SKIP_LOAD=1` restores it. Decide the key sample size first: at 20,000 keys per table the working set fits in the target's memory.
-2. **Add independent expected values.** Build a correctness suite keyed to the dataset manifest checksum. Conformance checks shape and consistency; the harness also needs expected quotes derived independently from the implementation under test. Publish expected values as data so every stack compares against the same answers without sharing pricing code.
-3. **Confirm `FRESH_MS`.** The provisional budget in [Background writes](../SPEC.md#background-writes) needs run evidence; `PDP-003` and `WRITE-002` depend on it.
-4. **Add an in-application background writer.** The harness currently drives writes through the application write surface. This exercises coherence but differs from application-owned background work.
+1. **Run `bench` ladders at steady state, then on tier 2.** A 5.3.2 snapshot of dataset `0.5.0` exists (`containers/.snapshots/bench-harper-5.3.2-dataset-0.5.0.tar.gz` in the main checkout); `SKIP_LOAD=1` restores it. Settle the warm-up first: within 10 minutes the target's memory had not yet filled (below).
+2. **Re-run the Fastify + Postgres + Redis target (application-architecture-benchmarks #6) against dataset `0.5.0`.** It is pinned to `1f4a350`, which carries the `0.4.0` dataset and the old access distribution.
+3. **Add independent expected values.** Build a correctness suite keyed to the dataset manifest checksum. Conformance checks shape and consistency; the harness also needs expected quotes derived independently from the implementation under test. Publish expected values as data so every stack compares against the same answers without sharing pricing code.
+4. **Confirm `FRESH_MS`.** The provisional budget in [Background writes](../SPEC.md#background-writes) needs run evidence; `PDP-003` and `WRITE-002` depend on it.
+5. **Add an in-application background writer.** The harness currently drives writes through the application write surface. This exercises coherence but differs from application-owned background work.
 
 ## External dependencies
 
@@ -59,7 +66,28 @@ Validation: full `npm run check` passes in this checkout, including deployment s
 | Sanity-check the invented promotion evaluation order | Reviewer with pricing-engine experience |
 | Answer the [OAuth scope question](questions/oauth-authorization-server-scope.md), drafted but unsent | `@harperfast/oauth` maintainers; not blocking P0 |
 
-## Bench-scale observations on 5.3.2 (2026-10-12)
+## Bench-scale observations on dataset 0.5.0 (2026-10-14)
+
+**Tier-1 signal, not results.** Harper 5.3.2, the Podman VM idle apart from this target (no other containers; VM load average 0.2), clock neither pinned nor measured. The database is 6.0 GB on disk against a 2 GiB budget.
+
+Two seven-step ladders (30 s steps) differed only in whether the VM's page cache was dropped before the cold start:
+
+| | Warm VM cache | Dropped |
+|---|---|---|
+| Cold start | 1.9 s | 4.7 s |
+| Highest unsaturated step | 150 rps, p50 16.4 ms | 125 rps, p50 16.7 ms |
+| Saturated at | 200 offered, 179 achieved | 150 offered, 133 achieved |
+| Target memory peak | 1,016 MiB (50%) | 1,411 MiB (69%) |
+| Disk reads per step | 16–22 MiB | 32–55 MiB |
+| Product cache hits | 0.8% → 9.2% | 0.8% → 8.7% |
+
+The warm cache was the restore's, charged to no target; the orchestrator now drops it by default.
+
+A 10-minute soak at 100 rps from a dropped cache shows where the working set lands. The target's memory climbed from 524 MiB a minute in to 1,774 MiB (87% of budget) and was still rising about 26 MiB a minute at the end; anonymous memory levelled at 973 MiB (heaps plus Harper's 512 MiB block cache), and page cache reached 769 MiB. It read 531 MiB from disk during the step, about 22 MiB a minute by the end, with no page-cache refaults. p50 16.0 ms, p99 222 ms, product hits 6.5%, target CPU 1.19 cores.
+
+**`DATA-004` is not yet demonstrated.** The catalog is three times the budget, every key is reachable, and the target keeps reading its cold tail from disk, but within 10 minutes its memory had not filled and nothing was evicted and re-read. `verify-run-record.mjs` failed all three runs on that check, as it should. At the soak's final growth rate the cache fills in roughly another 10 minutes; measured steps then run under eviction. That is a warm-up decision.
+
+## Bench-scale observations on 5.3.2, dataset 0.4.0 (2026-10-12)
 
 **Tier-1 signal, contaminated, not results.** One trial on Harper 5.3.2 with this branch's harness, restored from the 5.3.2 snapshot, on the shared Podman VM. Another agent's Harper target and generator were running throughout (recorded in the run's `otherContainersRunning`). The clock was neither pinned nor measured. Run-record verification passed.
 
@@ -113,9 +141,8 @@ Follow-up hypotheses:
 | **Unexplained `dev` latency.** One step had p90 in seconds; a higher step had single-digit milliseconds. Quotes were slow, not products. | Recheck on 5.3.2 with the dispatch fix; see the 2026-10-05 hypothesis about pre-5.3.1 write-lock release. |
 | **The write surface and response details are specified by tests, not `SPEC.md`.** The harness and suite require `POST /admin/variant/:sku` `{basePrice}`, `POST /admin/inventory/:id` `{onHand}`, an `invalidated` count in each write response, the `Server-Timing` grammar (`cache;desc=hit\|miss`, `data`, `compute`, `total`), and quote fields (`currency`, `region`, `taxJurisdiction`, `totalWeight`) that only [model.ts](../packages/spec/src/model.ts) names. | Specify them, or name `packages/spec` as normative, before a second implementation is built against the prose. |
 | **Metric definitions differ across stacks.** `invalidated` counts keys targeted (Harper writes an invalidation marker even for a never-cached key); a Redis `DEL` count is keys removed. Harper reports a request that waited on another request's in-flight fill as a hit. `total` excludes response serialization in both handlers. | Define each in `SPEC.md` so cache-hit rates and invalidation fan-out compare. |
-| **The reachable working set fits in memory.** 20,000 sampled keys per table, under the skew, kept the 2026-10-12 `bench` ladder's target cgroup at 725 MiB of 2 GiB. `verify-run-record.mjs` checks `DATA-004` only by labels. | Decide the key sample (all 300,000 carts and 2,000,000 product ids fit in the generator) and record memory against the budget; then check `DATA-004` on evidence. |
-| **One key takes 22.5% of draws.** The access skew's continuous power law gives index 0 a mass of (1/n)^(1/α): 22.5% of product reads, quotes, and writes at n = 20,000 and 32% at `dev`. The workload partly measures one hot row and one hot view. | Decide deliberately (a discrete Zipf, or a per-key cap) and disclose. Carts are built with the same function, so changing it regenerates the dataset. |
-| **Warm-up is 10 s at the first rate.** About 250 requests against 320,000 views; hit rates climb across an ascending ladder, so later steps run warmer. | Decide a fixed warm-up by request count, identical across targets, and re-run the first rate at the end to measure drift. |
+| **`DATA-004` needs a steady state.** With every key reachable and the cache dropped, a 10-minute soak filled 87% of the target's memory and was still growing; nothing was evicted. `verify-run-record.mjs` now checks memory against the budget and fails such a run. | Warm up until the target's memory reaches its budget (about 20 minutes at 100 rps here), identical across targets, then measure; re-run the first rate at the end to measure drift. |
+| **The Fastify target uses the old dataset.** application-architecture-benchmarks #6 is pinned to `1f4a350` (dataset `0.4.0`, the old distribution). | Follow up against dataset `0.5.0` before any comparison. |
 | **Arrivals are evenly spaced.** Deterministic spacing understates queueing against Poisson arrivals at the same utilization. | Decide whether to offer seeded Poisson arrivals. |
 | **Network softirq is not charged to a cgroup.** Bridge traffic between a separated stack's containers is partly unaccounted, and on tier 2 may run outside the target's CPUs; Harper has no such hops. | On tier 2, record per-step softirq for the target CPUs, or steer bridge interrupts onto them; disclose either way. |
 | **Duplicate SKU lines allocate inventory twice.** Promotions merge lines by SKU; availability does not, so a repeated SKU understates `shortfall`. The dataset has no such carts. | Clarify in `SPEC.md` whether lines merge for availability and in the response. |
@@ -146,6 +173,7 @@ Follow-up hypotheses:
 - **Cross-target comparisons:** only one implementation exists.
 - **Component CPU breakdowns:** Harper is one container; per-container accounting exists but no assembled stack has been measured.
 - **Benchmark results from `dev`:** it fits in memory.
+- **Any number from dataset `0.4.0`**, which covers every run before 2026-10-14: the access distribution and the carts have changed.
 - **Latency or target CPU from runs before 2026-10-12:** latency carries the dispatch artifact, target CPU was never recorded, and 5.2.12 images ran without msgpackr native acceleration.
 
 [bench/README.md](../bench/README.md#limitations) describes the harness limits. No run produced here is publishable.
