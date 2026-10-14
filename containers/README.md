@@ -64,7 +64,7 @@ These choices affect measurements and must match across targets:
 
 Every trial, the first included, starts by restoring the snapshot, so earlier writes do not alter later trials' starting state and trial 1 is not the odd one out. Cold, warm, and hot phases are recorded separately; the cold start also records how much of it the compose CLI took. A successful readiness response is not a correctness check. The target is stopped with a 120 s grace, and a snapshot is refused if it did not exit cleanly.
 
-Snapshots are named `<scale>-harper-<version>.tar.gz`. The provenance record names the dataset manifest hash, schema hash (comments excluded), Harper version, image, and architecture, and a restore refuses a snapshot whose scale, dataset, schema, version, or architecture differs from the run's, or is unknown. An existing snapshot without a record is refused unless `ALLOW_UNVERIFIED_SNAPSHOT=1`.
+Snapshots are named `<scale>-harper-<version>-dataset-<generator version>.tar.gz`, so a new Harper version or a regenerated dataset writes a new snapshot beside the old ones. The provenance record names the dataset manifest hash, schema hash (comments excluded), Harper version, image, and architecture, and a restore refuses a snapshot whose scale, dataset, schema, version, or architecture differs from the run's, or is unknown. An existing snapshot without a record is refused unless `ALLOW_UNVERIFIED_SNAPSHOT=1`.
 
 ## Accounting
 

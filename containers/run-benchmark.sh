@@ -92,7 +92,11 @@ else
   DATASET_HOST="$DATASET_ROOT/$SCALE"
   DATASET_IN_BENCH="/dataset/$SCALE"
 fi
-SNAPSHOT="$SNAPSHOT_DIR/${SCALE}-harper-${HARPER_VERSION}.tar.gz"
+# Named by everything that decides its bytes: scale, Harper version, and dataset generator
+# version — so a regenerated dataset writes a new snapshot beside the old one instead of over it.
+# Read from the committed manifest, which an older expansion under DATASET_ROOT cannot shadow.
+DATASET_GENERATOR="$(node -p "require('../dataset/$SCALE/MANIFEST.json').generatorVersion")"
+SNAPSHOT="$SNAPSHOT_DIR/${SCALE}-harper-${HARPER_VERSION}-dataset-${DATASET_GENERATOR}.tar.gz"
 PROBE_URL="http://localhost:9926/product/product-000000?tier=standard&region=us-east"
 
 say() { printf '\n==> %s\n' "$*"; }
