@@ -114,6 +114,9 @@ if (Array.isArray(ladder) && ladder.length !== steps.length) {
 }
 if (!conditions.orchestrator) fail('METHOD', 'no orchestrator conditions: not a container run with a fixed budget, restore, and cold start');
 else if (conditions.orchestrator.coldStart?.ms == null) fail('METHOD', 'no cold-start measurement');
+else if (!conditions.orchestrator.preStartHook && conditions.dataset?.scale === 'bench') {
+	fail('METHOD', 'no page-cache drop before the cold start: the target read data the restore cached outside its budget');
+}
 for (const step of steps) {
 	if (step.encodedResponses > 0) {
 		fail('METHOD', `step ${step.label}: ${step.encodedResponses} compressed responses — compression is excluded for every target`);

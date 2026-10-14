@@ -81,6 +81,15 @@ export DATASET_ROOT="${DATASET_ROOT:-$REPO/.work/dataset}"
 SNAPSHOT_DIR="${SNAPSHOT_DIR:-$PWD/.snapshots}"
 mkdir -p "$DATASET_ROOT" "$SNAPSHOT_DIR"
 
+# The restore runs in its own container, so the restored files sit in the host's page cache
+# charged to no target: a target started on them reads its data from memory outside its
+# budget. Measured on tier 1, that warm cache halved cold start, raised the saturation rate
+# by a third, and kept disk reads at 40% of a cold run. On a Podman machine the VM's cache is
+# dropped by default; elsewhere set PRE_START_HOOK (tier 2 does, as root).
+if [ -z "${PRE_START_HOOK+set}" ] && [ "$CONTAINER_CLI" = podman ] && podman machine inspect >/dev/null 2>&1; then
+  PRE_START_HOOK="podman machine ssh 'sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null'"
+fi
+
 COMPOSE_FILES="compose.yaml ${COMPOSE_EXTRA:-}"
 COMPOSE="$CONTAINER_CLI compose"
 for file in $COMPOSE_FILES; do COMPOSE="$COMPOSE -f $file"; done

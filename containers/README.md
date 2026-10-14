@@ -28,7 +28,7 @@ The header of [run-benchmark.sh](run-benchmark.sh) lists every setting. The ones
 | `SKIP_LOAD=1` | Restore the existing snapshot instead of seeding. The snapshot's provenance must match. |
 | `COMPOSE_EXTRA` | Extra compose files layered over `compose.yaml`. `compose.tier2.yaml` places the target and generator in the tier-2 host's slices. |
 | `TIER` | Recorded with the run; tier 1 records that the clock is neither pinned nor measured. |
-| `PRE_START_HOOK` | Host command run between stopping the target and its measured start. Tier 2 drops the page cache here; on tier-1 Podman the VM's cache is dropped with `podman machine ssh 'sync; echo 3 \| sudo tee /proc/sys/vm/drop_caches'`, which also cools every other container on the machine. |
+| `PRE_START_HOOK` | Host command run between stopping the target and its measured start, to drop the page cache the restore filled outside the target's budget. On a Podman machine it defaults to dropping the VM's cache, which also cools every other container on the machine; tier 2 sets it to drop the host's, as root. A `bench` record without one fails verification. |
 | `DATASET_ROOT`, `SNAPSHOT_DIR` | Where expanded datasets and snapshots live, so a worktree can use another checkout's. |
 | `KEEP_TARGET=1` | Leave the target running afterwards; by default it is stopped. |
 
@@ -71,6 +71,10 @@ Snapshots are named `<scale>-harper-<version>-dataset-<generator version>.tar.gz
 The generator reads the target's CPU per step from cgroup v2 `cpu.stat`, through a read-only mount of the host's cgroup tree: the target container's scope by default, or the cgroups in `TARGET_CGROUPS` (a separated stack's containers, or a tier-2 slice). Each step records its wall-clock start, offer end, and drain end, so host-side samples such as tier 2's per-cgroup cycle counts can be joined to it. The orchestrator passes the conditions the generator cannot see — Harper version, image and base-image digests, budget requested and applied, compose files, tier, snapshot provenance, cold start, and other containers running on the machine — and they are recorded under `conditions.orchestrator`.
 
 Output is stored in the `bench-results` volume at `/results`.
+
+## Tier-1 disk space
+
+A Podman VM's disk image grows as the data volume is wiped and restored, and does not return freed blocks to macOS by itself. `podman machine ssh sudo fstrim -v /` returns them; one trim after a seed and two restores freed 16 GB on the host.
 
 ## Rebuild after code changes
 
