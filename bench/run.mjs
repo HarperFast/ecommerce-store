@@ -556,8 +556,14 @@ const warm = await step({ rate: RATES[0], seconds: WARMUP, nextRequest, nextWrit
 console.log(`  ${warm.errors} errors\n`);
 await new Promise((resolve) => setTimeout(resolve, QUIESCE_MS));
 
-console.log('rate   offered  achieved   p50      p90      p99      max     errors  genCPU  tgtCPU  cacheHit  inval');
-console.log('─'.repeat(108));
+console.log('rate   offered  achieved   p50      p90      p99      max     errors  genCPU  tgtCPU  cacheHit  inval  memMiB  readMiB');
+console.log('─'.repeat(124));
+
+/** A per-container figure summed over the target's cgroups, for the console. */
+const componentSum = (result, field, scale) =>
+	result.targetComponents?.length && result.targetComponents.every((c) => c[field] != null)
+		? (result.targetComponents.reduce((sum, c) => sum + c[field], 0) / scale).toFixed(0)
+		: 'n/a';
 
 const steps = [];
 for (const rate of RATES) {
@@ -586,7 +592,8 @@ for (const rate of RATES) {
 			`${result.generatorCpuLoad.toFixed(2).padStart(6)}  ` +
 			`${(result.targetCpuLoad === null ? 'n/a' : result.targetCpuLoad.toFixed(2)).padStart(6)}  ` +
 			`${(result.cacheHitRate === null ? 'n/a' : `${(result.cacheHitRate * 100).toFixed(1)}%`).padStart(8)}  ` +
-			`${String(result.invalidations).padStart(5)}${flag}`
+			`${String(result.invalidations).padStart(5)}  ` +
+			`${componentSum(result, 'memoryCurrentBytes', 2 ** 20).padStart(6)}  ${componentSum(result, 'diskReadBytes', 2 ** 20).padStart(7)}${flag}`
 	);
 	await new Promise((resolve) => setTimeout(resolve, QUIESCE_MS));
 }

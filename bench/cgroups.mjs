@@ -86,6 +86,25 @@ export async function readCgroup(dir) {
 	} catch {
 		return null;
 	}
+	// Page cache against anonymous memory, and how often the cache evicted pages it then had to
+	// read back: refaults and major faults are what a working set larger than memory looks like.
+	const memory = {};
+	try {
+		for (const line of (await readFile(join(dir, 'memory.stat'), 'utf8')).split('\n')) {
+			const [key, value] = line.split(' ');
+			if (key) memory[key] = Number(value);
+		}
+	} catch {}
+	let readBytes = null;
+	try {
+		readBytes = 0;
+		for (const line of (await readFile(join(dir, 'io.stat'), 'utf8')).split('\n')) {
+			const match = line.match(/rbytes=(\d+)/);
+			if (match) readBytes += Number(match[1]);
+		}
+	} catch {
+		readBytes = null;
+	}
 	return {
 		atEpochMs: Date.now(),
 		usageUsec: stat.usage_usec ?? null,
@@ -95,6 +114,12 @@ export async function readCgroup(dir) {
 		throttledUsec: stat.throttled_usec ?? null,
 		memoryCurrent: await readNumber(join(dir, 'memory.current')),
 		memoryPeak: await readNumber(join(dir, 'memory.peak')),
+		memoryMax: await readNumber(join(dir, 'memory.max')),
+		anon: memory.anon ?? null,
+		file: memory.file ?? null,
+		refaults: memory.workingset_refault_file ?? null,
+		majorFaults: memory.pgmajfault ?? null,
+		readBytes,
 	};
 }
 
@@ -125,6 +150,12 @@ export function accountStep(cgroups, before, after) {
 			memoryCurrentBytes: b.memoryCurrent,
 			// memory.peak is the cgroup's high-water mark since it was created, not this step's.
 			memoryPeakSinceStartBytes: b.memoryPeak,
+			memoryMaxBytes: b.memoryMax,
+			anonBytes: b.anon,
+			pageCacheBytes: b.file,
+			pageCacheRefaults: delta(a.refaults, b.refaults),
+			majorFaults: delta(a.majorFaults, b.majorFaults),
+			diskReadBytes: delta(a.readBytes, b.readBytes),
 		};
 	});
 	const complete = components.length > 0 && components.every((c) => c.cpuSeconds !== null);
