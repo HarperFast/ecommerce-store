@@ -8,7 +8,7 @@
  * NOTHING in generation may use Math.random, Date.now, or crypto randomness.
  */
 
-import { skewedIndex } from '@ecommerce-store/spec';
+import { zipfRank } from '@ecommerce-store/spec';
 
 /** FNV-1a, so a seed string maps to a 32-bit state deterministically across runtimes. */
 function hashSeed(seed: string): number {
@@ -69,14 +69,13 @@ export class Rng {
 	}
 
 	/**
-	 * A skewed index into [0, n), using the shared access distribution.
+	 * A Zipf rank in [0, n) from the shared access distribution; `scramble` maps it to a key.
 	 *
 	 * Delegates to `@ecommerce-store/spec` rather than defining its own curve: the dataset's
 	 * hot products and the workload's hot products MUST be the same products, and two copies
-	 * of a formula is how they stop being. The previous local version used an exponent of
-	 * 1.1, which is very nearly uniform — it gave the top 1% of the catalog 1.52% of draws.
+	 * of a formula is how they stop being. One draw of the stream per call.
 	 */
-	skewed(n: number): number {
-		return skewedIndex(this.next(), n);
+	zipfRank(n: number): number {
+		return zipfRank(this.next(), n);
 	}
 }

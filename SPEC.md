@@ -1,6 +1,6 @@
 # Ecommerce Store — Application Specification
 
-**Spec version:** `0.2.0-draft` · **Status:** P0 draft · **Last updated:** 2026-10-09 (editorial; requirements unchanged)
+**Spec version:** `0.2.0-draft` · **Status:** P0 draft · **Last updated:** 2026-10-14 (access distribution stated; requirements unchanged)
 
 Scope, methodology, and the rules governing how results may be described are defined by [Harper Application Architecture Benchmarks](https://github.com/HarperFast/application-architecture-benchmarks). That document is binding. This one defines only the application.
 
@@ -78,6 +78,16 @@ Implementations may rely on these dataset invariants:
 - `DATA-003` **MUST** — Every implementation loads **the same versioned dataset**, verified by checksum before a run.
 - `DATA-004` **MUST** — There is one dataset size, sized so the working set does not fit in memory on the benchmark hardware. A dataset that fits entirely in cache measures something other than the architecture.
 - `DATA-005` **MUST** — The dataset is generated deterministically and kept under version control. A comparison run against differing data is void.
+
+### Access distribution
+
+The dataset's carts and the harness share one key distribution, defined in [packages/spec/src/workload.ts](packages/spec/src/workload.ts) and recorded in each dataset's `MANIFEST.json`:
+
+- **A discrete Zipf over rank** with exponent `s = 0.8845`, the value at which the hottest 1% of the 2,000,000-product catalog takes half of all draws. The hottest single product takes 2.6%.
+- **Each rank mapped to a key by a fixed, seeded scramble**, so the hot keys are spread across the id space rather than being its lowest ids.
+- **Reads draw from every cart and every product.** Background writes draw their products from the same distribution, so they land on what is read (`WRITE-001`), identically for every target (`WRITE-004`).
+
+Carts are generated from the same distribution, so a change to it changes the dataset and every result produced from it.
 
 ---
 

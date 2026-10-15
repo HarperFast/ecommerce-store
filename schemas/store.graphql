@@ -6,10 +6,16 @@
 #
 # @sealed everywhere: the dataset is fixed and checksum-verified, so an unexpected attribute
 # means a loader bug, and failing loudly at write time beats discovering it in a result.
+#
+# @indexed only where the application queries: Variant.productId (the product view's variant
+# lookup) and the promotion eligibility keys. Every other read is by primary key or a scan of a
+# small lookup table. An index nothing queries is paid for on every load and write and in
+# storage — 62 million entries on Inventory alone at `bench` — and a benchmark should not
+# carry dead weight on either side. Add one back with the query that needs it.
 
 type Cart @table @export @sealed {
 	id: ID @primaryKey
-	customerId: String @indexed
+	customerId: String
 	# [{ sku, quantity }] — embedded, so reading the cart is ONE read. The per-line fan-out
 	# is the second wave; splitting lines out would add a wave the spec does not describe.
 	lines: Any
@@ -17,16 +23,16 @@ type Cart @table @export @sealed {
 
 type Customer @table @export @sealed {
 	id: ID @primaryKey
-	tier: String @indexed
+	tier: String
 	loyaltyBalance: Int
-	region: String @indexed
-	taxJurisdiction: String @indexed
+	region: String
+	taxJurisdiction: String
 }
 
 type Product @table @export @sealed {
 	id: ID @primaryKey
 	title: String
-	categoryIds: [String] @indexed
+	categoryIds: [String]
 	weight: Int
 	# Fans out to further Product reads — depth preserved. SPEC.md#foldings-and-what-they-cost.
 	relatedProductIds: [String]
@@ -47,21 +53,21 @@ type Inventory @table @export @sealed {
 	# `${sku}:${locationId}` — a synthetic key so a line's availability is a bounded set of
 	# direct reads on every implementation rather than a scan.
 	id: ID @primaryKey
-	sku: String @indexed
-	locationId: String @indexed
+	sku: String
+	locationId: String
 	onHand: Int
 }
 
 type Location @table @export @sealed {
 	id: ID @primaryKey
-	region: String @indexed
+	region: String
 	# Lower wins when resolving availability — QUOTE-003.
 	priority: Int
 }
 
 type Promotion @table @export @sealed {
 	id: ID @primaryKey
-	kind: String @indexed
+	kind: String
 	# Empty array means "no restriction on this dimension". Kept as the authoritative
 	# eligibility data; `isEligible` reads these.
 	tiers: [String]
@@ -79,11 +85,11 @@ type Promotion @table @export @sealed {
 
 type Rate @table @export @sealed {
 	id: ID @primaryKey
-	kind: String @indexed
-	region: String @indexed
+	kind: String
+	region: String
 	weightMin: Int
 	weightMax: Int
-	jurisdiction: String @indexed
+	jurisdiction: String
 	amountMinor: Int
 	basisPoints: Int
 }
@@ -96,8 +102,10 @@ type Rate @table @export @sealed {
 # 16 entries per product across 4 tiers and 4 regions.
 #
 # Filled by a sourcedFrom resolver (resources/product.js) that does the fan-out, and kept
-# coherent two ways: explicit invalidation on every write that can change it, with the TTL
-# as the backstop that bounds staleness even if an invalidation is ever missed. An
+# coherent two ways: explicit invalidation by every write through the application's write
+# surface, which meets FRESH_MS (CACHE-002), and a 120 s TTL as the backstop for anything the
+# write surface does not cover — a write made directly to a table over REST or the operations
+# API, as SPEC.md#background-writes describes, converges only on expiry. An
 # implementation on a separated stack puts the same aggregate in Redis with the same key;
 # what differs is what invalidating it costs, which is exactly what SPEC.md#background-writes measures.
 #
@@ -106,9 +114,8 @@ type Rate @table @export @sealed {
 
 type ProductView @table(expiration: 120) {
 	id: ID @primaryKey
-	productId: String @indexed
+	productId: String
 	tier: String
 	region: String
 	payload: Any
-	assembledAt: Long
 }

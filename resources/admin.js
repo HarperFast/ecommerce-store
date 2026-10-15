@@ -12,26 +12,18 @@
  *
  * Not an endpoint under test: its own latency is not a headline metric (SPEC.md#background-writes).
  */
-import { Resource } from 'harper';
+import { Resource, getContext, tables, transaction } from 'harper';
+import { lookupTable } from './lib/lookup.js';
 import { REGIONS, TIERS, viewKey } from './product.js';
 
 const { Variant, Inventory, Location, ProductView } = tables;
 
-/** Region of a fulfillment location. Few and static, so resolved once. */
-let regionOfLocation = null;
-function loadLocationRegions() {
-	if (!regionOfLocation) {
-		regionOfLocation = (async () => {
-			const map = new Map();
-			for await (const location of Location.search({})) map.set(location.id, location.region);
-			return map;
-		})().catch((error) => {
-			regionOfLocation = null;
-			throw error;
-		});
-	}
-	return regionOfLocation;
-}
+/** Region of each fulfillment location: which views an inventory write can change. */
+const loadLocationRegions = lookupTable(async () => {
+	const map = new Map();
+	for await (const location of Location.search({})) map.set(location.id, location.region);
+	return map;
+});
 
 /**
  * Invalidate the cached views a write can have changed, and only those.
@@ -42,11 +34,36 @@ function loadLocationRegions() {
  * game here, and a cache keyed less precisely would have to drop all 16 either way.
  */
 async function invalidateViews(productId, region) {
+	// Commit the source-of-truth write FIRST, then invalidate in the next transaction.
+	//
+	// Harper orders writes to a key by transaction timestamp, and a transaction is stamped when
+	// it starts, not when it commits. Staged in the write's own transaction, the invalidation
+	// carried the write's START time. A view fill that began after that start but read before
+	// the commit assembled the old price, was stamped later than the invalidation, and so won:
+	// either the invalidation was discarded as older than the cached entry, or the fill
+	// replaced the invalidation marker. The stale view then survived until expiry (120 s)
+	// against a 1 s FRESH_MS — scripts/verify-coherence.mjs reproduced it.
+	//
+	// Invalidating after the commit stamps the invalidation after every snapshot that could
+	// have read the old row, and a fill stamped before it is discarded instead of cached. A
+	// separated stack's cache-aside write has the same shape: commit to Postgres, then evict.
+	await getContext().transaction.commit();
+	if (!productId) return 0;
 	const regions = region ? [region] : REGIONS;
 	const keys = [];
 	for (const r of regions) for (const tier of TIERS) keys.push(viewKey(productId, tier, r));
-	await Promise.all(keys.map((key) => ProductView.invalidate(key)));
-	return keys.length;
+	// In a transaction of its own rather than the request's next one: the write is already
+	// durable, so a client disconnect or a commit conflict on a hot view key in the request's
+	// scope must not cancel the eviction that makes the write visible. Retried, because a
+	// conflict with a concurrent fill of the same key is expected on hot products.
+	for (let attempt = 1; ; attempt++) {
+		try {
+			await transaction({}, () => Promise.all(keys.map((key) => ProductView.invalidate(key))));
+			return keys.length;
+		} catch (error) {
+			if (attempt >= 3) throw error;
+		}
+	}
 }
 
 export class adminVariant extends Resource {
@@ -71,7 +88,7 @@ export class adminVariant extends Resource {
 			error.statusCode = 404;
 			throw error;
 		}
-		await Variant.put({ ...variant, basePrice });
+		await Variant.patch(sku, { basePrice });
 		const invalidated = await invalidateViews(variant.productId, null);
 		return { sku, basePrice, invalidated };
 	}
@@ -99,7 +116,7 @@ export class adminInventory extends Resource {
 			error.statusCode = 404;
 			throw error;
 		}
-		await Inventory.put({ ...row, onHand });
+		await Inventory.patch(id, { onHand });
 
 		const variant = await Variant.get(row.sku);
 		const region = (await loadLocationRegions()).get(row.locationId);

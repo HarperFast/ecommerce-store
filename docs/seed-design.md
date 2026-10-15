@@ -50,6 +50,17 @@ There is one benchmark size: `bench`, designed to exceed the target's memory (`D
 | Variants per product | A long tail rather than a constant. |
 | Inventory | Stock varies across locations so priority resolution does real work. |
 | Promotions | Vary eligibility and exercise stacking, exclusivity, thresholds, and BOGO. |
-| Access | A hot subset makes cache hits measurable. Reads and writes target the same working set (`WRITE-001`). |
+| Access | A hot subset makes cache hits measurable, and a cold tail larger than memory makes `DATA-004` hold. Reads and writes target the same working set (`WRITE-001`). |
 
-The generator and harness share the access distribution in [packages/spec/src/workload.ts](../packages/spec/src/workload.ts). Current promotion-phase balance is an [open design issue](plan.md#open).
+The generator and harness share the access distribution in [packages/spec/src/workload.ts](../packages/spec/src/workload.ts), stated in [SPEC.md](../SPEC.md#access-distribution): a discrete Zipf with `s = 0.8845`, scrambled from rank to key. `MANIFEST.json` records both the expected head and top-key mass and the mass the generated carts actually hold. Current promotion-phase balance is an [open design issue](plan.md#open).
+
+## Regenerations
+
+Each regeneration changes the contract, so each is recorded here.
+
+| Generator | Date | Change | Tables changed |
+|---|---|---|---|
+| `0.5.0` | 2026-10-12 | Cart lines draw products from a scrambled discrete Zipf (`s = 0.8845`). The continuous power law it replaces put 22.5% of a 20,000-key draw on one key and clustered the hot set at the lowest ids. | `cart` only; every other table is byte-identical |
+| `0.4.0` | before 2026-10-12 | The dataset every earlier run and observation used. | — |
+
+**Every number produced before generator `0.5.0` used the `0.4.0` dataset** and is not comparable with later runs.

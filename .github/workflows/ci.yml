@@ -50,6 +50,20 @@ jobs:
       - name: The promotion index never excludes an eligible promotion
         run: npm run check:index
 
+      # The generator and the harness share one access distribution; its head claim is checked
+      # by counting draws, and its scramble by exhausting the key space.
+      - name: The access distribution does what it claims
+        run: npm run check:distribution
+
+      # Tier 2's efficiency figure: host cycle samples joined to each step's wall-clock window,
+      # tested against real perf output from the tier-2 qualification.
+      - name: The tier-2 cycle join attributes cycles to the right steps
+        run: npm run check:cycles
+
+      # DATA-004's memory evidence must not depend on how a target divides its budget.
+      - name: The working-set test is fair to a split budget and fails one that fits
+        run: npm run check:memory
+
       # DATA-001/002/003/005 are properties of the committed artifact, not of a request.
       - name: The dataset matches its manifest and is not pre-joined
         run: npm run check:dataset
@@ -103,7 +117,7 @@ jobs:
           HDB_ADMIN_USERNAME: ci
           # Plain HTTP: outside dev mode Harper defaults to HTTPS, and TLS has nothing to do
           # with what the conformance suite asserts.
-          HARPER_SET_CONFIG: '{"threads":2,"logging":{"level":"warn"},"http":{"port":9926,"securePort":null},"operationsApi":{"network":{"port":9925,"securePort":null}}}'
+          HARPER_SET_CONFIG: '{"threads":{"count":2},"logging":{"level":"warn"},"http":{"port":9926,"securePort":null},"operationsApi":{"network":{"port":9925,"securePort":null}}}'
         run: |
           mkdir -p "$HOME"
           HDB_ADMIN_PASSWORD=$(node -e "console.log(require('node:crypto').randomBytes(18).toString('base64url'))")
@@ -131,6 +145,12 @@ jobs:
         env:
           BASE_URL: http://localhost:9926
         run: npm run test --prefix e2e
+
+      # Readers racing writers on a few hot products. The suite above proves a write becomes
+      # visible when nothing else is happening; a lost invalidation needs concurrency to
+      # appear. Last, because it mutates prices.
+      - name: Cache coherence under concurrency
+        run: node scripts/verify-coherence.mjs --url http://localhost:9926 --seconds 10
 
       - name: Harper log
         if: failure()

@@ -11,7 +11,7 @@
  * contract is actually about (DATA-003) rather than the transport. `dev` is committed raw
  * and is verified in place without copying.
  */
-import { createReadStream, createWriteStream } from 'node:fs';
+import { createReadStream, createWriteStream, existsSync } from 'node:fs';
 import { mkdir, readFile, copyFile } from 'node:fs/promises';
 import { createGunzip } from 'node:zlib';
 import { createHash } from 'node:crypto';
@@ -39,25 +39,34 @@ if (!manifest.compressed && srcDir === outDir) {
 	await mkdir(outDir, { recursive: true });
 }
 
+async function sha256Of(path) {
+	const hash = createHash('sha256');
+	for await (const chunk of createReadStream(path)) hash.update(chunk);
+	return hash.digest('hex');
+}
+
 let total = 0;
 for (const table of tables) {
 	const target = join(outDir, `${table}.ndjson`);
-	const hash = createHash('sha256');
+	const expected = manifest.files[table].sha256;
+	const copies = manifest.compressed || srcDir !== outDir;
+	// An expansion already on disk that matches the manifest is the same bytes; re-expanding
+	// 4 GB to reach the same checksum buys nothing. Anything else is expanded again.
+	const reused = copies && existsSync(target) && (await sha256Of(target)) === expected;
 
-	if (manifest.compressed) {
-		await pipeline(createReadStream(join(srcDir, `${table}.ndjson.gz`)), createGunzip(), createWriteStream(target));
-	} else if (srcDir !== outDir) {
-		await copyFile(join(srcDir, `${table}.ndjson`), target);
-	}
-
-	const readFrom = manifest.compressed || srcDir !== outDir ? target : join(srcDir, `${table}.ndjson`);
-	for await (const chunk of createReadStream(readFrom)) hash.update(chunk);
-	const actual = hash.digest('hex');
-	if (actual !== manifest.files[table].sha256) {
-		throw new Error(`${table} checksum mismatch\n  manifest ${manifest.files[table].sha256}\n  actual   ${actual}`);
+	if (!reused) {
+		if (manifest.compressed) {
+			await pipeline(createReadStream(join(srcDir, `${table}.ndjson.gz`)), createGunzip(), createWriteStream(target));
+		} else if (srcDir !== outDir) {
+			await copyFile(join(srcDir, `${table}.ndjson`), target);
+		}
+		const actual = await sha256Of(copies ? target : join(srcDir, `${table}.ndjson`));
+		if (actual !== expected) {
+			throw new Error(`${table} checksum mismatch\n  manifest ${expected}\n  actual   ${actual}`);
+		}
 	}
 	total += manifest.files[table].rows;
-	console.log(`  ${table.padEnd(10)} ${String(manifest.files[table].rows).padStart(10)} rows  verified`);
+	console.log(`  ${table.padEnd(10)} ${String(manifest.files[table].rows).padStart(10)} rows  verified${reused ? ' (existing expansion)' : ''}`);
 }
 
 if (manifest.compressed || srcDir !== outDir) await copyFile(join(srcDir, 'MANIFEST.json'), join(outDir, 'MANIFEST.json'));

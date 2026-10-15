@@ -30,7 +30,12 @@ export const EPOCH_MS = 1_767_225_600_000;
  * Accompanies the committed dataset. Verified before every run; recorded with every
  * published result — SPEC.md DATA-003, DATA-005.
  */
-export const GENERATOR_VERSION = '0.4.0' as const;
+/**
+ * 0.5.0 (2026-10-12): cart lines draw products from a scrambled discrete Zipf (s = 0.8845)
+ * instead of a continuous power law that put 22.5% of draws on index 0. Only `cart` changed;
+ * every number produced before this version used 0.4.0.
+ */
+export const GENERATOR_VERSION = '0.5.0' as const;
 
 export interface DatasetManifest {
 	specVersion: string;

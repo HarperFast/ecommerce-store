@@ -17,13 +17,29 @@
 
 name: harper-ecommerce-bench
 
+# Base images, pinned by digest for every run: a tag moves, and a target rebuilt on another day
+# would run on another Node. Multi-arch index digests, so tier 1 (arm64) and tier 2 (x86-64)
+# resolve the same release. Recorded with every run; verify-run-record.mjs fails a `bench`
+# record without them. Update both together, deliberately, and say so in docs/plan.md.
+x-base-images:
+  node: &node-image node:24@sha256:14078204b6bb268c107ceff6d3c43f45a888105e5c2b18b14c32b3409d93a1b0
+  node-slim: &node-slim-image node:24-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5
+
 services:
   harper:
+    # Tagged per build, so two builds of the target can coexist in one session: the orchestrator
+    # sets TARGET_CONTEXT and TARGET_IMAGE_TAG when TARGET_REF names a commit (run-benchmark.sh).
+    # TARGET_IMAGE names the repository. Image names are global to the host, not to a compose
+    # project, so another project building this target sets its own to keep from replacing ours.
+    image: ${TARGET_IMAGE:-harper-ecommerce-bench-harper}:${TARGET_IMAGE_TAG:-checkout}
     build:
-      context: ..
-      dockerfile: containers/Dockerfile
+      context: ${TARGET_CONTEXT:-..}
+      # The checkout's Dockerfile for every build, so builds differ only in application code.
+      dockerfile: ${TARGET_DOCKERFILE:-containers/Dockerfile}
       args:
-        HARPER_VERSION: ${HARPER_VERSION:-5.2.12}
+        HARPER_VERSION: ${HARPER_VERSION:-5.3.2}
+        NODE_IMAGE: *node-image
+        NODE_SLIM_IMAGE: *node-slim-image
     networks: [bench]
     ports:
       # Published only so a human can poke at it. The measured generator talks over the
@@ -35,14 +51,18 @@ services:
       - harper-data:/data
     environment:
       # Harper's worker-thread count. HARPER_SET_CONFIG takes a JSON object and overrides
-      # harperdb-config.yaml at boot. Default `threads` is 4; it is pinned to the container's
-      # CPU budget here so the target is not oversubscribed against its own limit, and so the
-      # value is explicit in the run record rather than inherited.
+      # harper-config.yaml at boot. Unset, Harper derives `threads.count` from os.cpus() — the
+      # VM's CPUs, not this container's limit — capped by cgroup memory, which gives 4 workers
+      # on a 2-CPU budget. It is pinned to the CPU budget here so the target is not
+      # oversubscribed against its own limit, and so the value is explicit in the run record.
+      # The object form, not the bare number: 5.3 accepts both, but the number form drops the
+      # rest of the `threads` defaults and the startup banner then reports the count as
+      # undefined and debugging as enabled.
       # Plain HTTP, deliberately. Outside dev mode Harper defaults to HTTPS on both ports, and
       # TLS termination is a real per-request cost that has nothing to do with the
       # architecture under test. Every target must make the same choice; it is recorded with
       # the run.
-      HARPER_SET_CONFIG: '{"threads":${HARPER_THREADS:-2},"logging":{"level":"warn","stdStreams":true},"http":{"port":9926,"securePort":null},"operationsApi":{"network":{"port":9925,"securePort":null}}}'
+      HARPER_SET_CONFIG: '{"threads":{"count":${HARPER_THREADS:-2}},"logging":{"level":"warn","stdStreams":true},"http":{"port":9926,"securePort":null},"operationsApi":{"network":{"port":9925,"securePort":null}}}'
       # Harper's installer prompts interactively unless all three are supplied. Values live in
       # containers/.env — local test credentials for a container that only ever gets
       # benchmarked, reachable only on this compose bridge.
@@ -54,23 +74,29 @@ services:
         limits:
           cpus: "${TARGET_CPUS:-2}"
           memory: "${TARGET_MEMORY:-2g}"
-    healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://localhost:9926/product/product-000000?tier=standard&region=us-east').then(r=>process.exit(r.status<500?0:1)).catch(()=>process.exit(1))"]
-      interval: 5s
-      timeout: 5s
-      retries: 30
-      start_period: 20s
+    # No healthcheck, deliberately. A compose healthcheck execs its probe INSIDE the target
+    # every interval for the life of the container — a Node process every 5 s, charged to the
+    # budget under measurement for the whole run. Readiness is probed from outside instead
+    # (containers/wait-ready.mjs), and no target in a comparison may run one either.
 
   bench:
-    image: node:24-slim
+    image: *node-slim-image
     networks: [bench]
     working_dir: /work
     volumes:
       - ../:/work:ro
       - bench-results:/results
+      # Expanded datasets live outside the checkout's tracked tree (.work/ by default), and a
+      # worktree can point DATASET_ROOT at another checkout's expansion instead of re-expanding.
+      - ${DATASET_ROOT:-../.work/dataset}:/dataset:ro
+      # The host's cgroup v2 tree, read-only, so the generator can account the TARGET's CPU per
+      # step from its container scope. The generator shares a kernel with the target on both
+      # tiers (a Podman VM, a Linux host), and a process inside the generator cannot see the
+      # target's processes at all.
+      - /sys/fs/cgroup:/host-cgroup:ro
     depends_on:
       harper:
-        condition: service_healthy
+        condition: service_started
     environment:
       TARGET_URL: http://harper:9926
       OPS_URL: http://harper:9925

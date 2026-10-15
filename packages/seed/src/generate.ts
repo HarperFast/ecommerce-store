@@ -8,7 +8,7 @@
  * Determinism rules (docs/seed-design.md): one seeded PRNG consumed in a fixed order, ids
  * derived rather than drawn, no wall clock, integer minor units only.
  */
-import { UNRESTRICTED } from '@ecommerce-store/spec';
+import { UNRESTRICTED, scramble } from '@ecommerce-store/spec';
 import { Rng } from './prng.ts';
 import {
 	ADJECTIVES, BRANDS, CART_SIZE, CATEGORIES, JURISDICTIONS, LOCATIONS_PER_SKU,
@@ -240,7 +240,17 @@ export function* rates(): Generator<Record<string, unknown>> {
 	}
 }
 
-export function* carts(scale: Scale, counts: number[], rng: Rng): Generator<Record<string, unknown>> {
+/** What the cart generator actually drew, so the manifest states measured mass, not intent. */
+export interface CartLineStats {
+	lines: number;
+	/** Lines whose product is among the hottest `headShare` of ranks. */
+	headLines: number;
+	/** Lines on the single hottest product. */
+	topLines: number;
+}
+
+export function* carts(scale: Scale, counts: number[], rng: Rng, headShare: number, stats: CartLineStats): Generator<Record<string, unknown>> {
+	const headRanks = Math.floor(scale.products * headShare);
 	for (let i = 0; i < scale.carts; i++) {
 		const size = rng.weighted(CART_SIZE);
 		const lines: { sku: string; quantity: number }[] = [];
@@ -255,8 +265,12 @@ export function* carts(scale: Scale, counts: number[], rng: Rng): Generator<Reco
 			// lines against a declared 3.81). Cart size drives the quote's fan-out, which is the
 			// primary measured endpoint, so the manifest has to describe the data it ships.
 			let s: string | null = null;
+			let rank = -1;
 			for (let attempt = 0; attempt < 16 && s === null; attempt++) {
-				const productIndex = rng.skewed(scale.products);
+				rank = rng.zipfRank(scale.products);
+				// Scrambled, so the hot products are spread across the catalog rather than being
+				// its lowest ids — the same mapping the harness uses for reads and writes.
+				const productIndex = scramble(rank, scale.products);
 				const variantIndex = rng.int(0, counts[productIndex] - 1);
 				const candidate = sku(productIndex, variantIndex);
 				if (!seen.has(candidate)) s = candidate;
@@ -266,6 +280,9 @@ export function* carts(scale: Scale, counts: number[], rng: Rng): Generator<Reco
 			// unbounded loop.
 			if (s === null) break;
 			seen.add(s);
+			stats.lines++;
+			if (rank < headRanks) stats.headLines++;
+			if (rank === 0) stats.topLines++;
 			lines.push({ sku: s, quantity: rng.weighted([[1, 60], [2, 22], [3, 10], [5, 6], [10, 2]] as const) });
 		}
 		yield { id: cartId(i), customerId: customerId(rng.int(0, scale.customers - 1)), lines };

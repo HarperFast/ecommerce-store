@@ -3,8 +3,8 @@
 # dev-only reaches the node.
 #
 # Harper packs a component with `npm pack --ignore-scripts`, extracts it to
-# components/<project>, then runs `npm install --force --omit=dev --no-audit --no-fund`
-# with the component root as cwd. This reproduces that, offline from any Harper instance.
+# components/<project>, then runs `npm install --force --omit=dev --no-audit --no-fund
+# --ignore-scripts` with the component root as cwd (Harper 5.3: packageManagerInstallArguments). This reproduces that, offline from any Harper instance.
 #
 # Run it after adding ANY dependency. Optional peer dependencies make dev tooling leak onto
 # the node without appearing anywhere in a manifest — see docs/structure.md.
@@ -29,7 +29,7 @@ tar -xzf "$TARBALL" -C node --strip-components=1
 
 echo "==> installing as Harper does"
 cd node
-npm install --force --omit=dev --no-audit --no-fund >/dev/null 2>&1
+npm install --force --omit=dev --no-audit --no-fund --ignore-scripts >/dev/null 2>&1
 
 status=0
 for pkg in "${FORBIDDEN[@]}"; do

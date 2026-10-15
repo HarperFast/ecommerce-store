@@ -9,26 +9,31 @@
  *     load offered to it, which hides exactly the saturation behaviour we are looking for.
  *   - LOAD LADDER. A single saturating rate produces no inflection point. The reportable
  *     result is "sustains N rps before p99 crosses T", which requires the ladder.
- *   - GENERATOR HEADROOM. The generator's own CPU is recorded with every step, and a step
- *     where it saturates is marked unreliable rather than reported.
- *   - PER-TARGET CPU. The target process's CPU time is sampled per step, so efficiency can
+ *   - GENERATOR HEADROOM. The generator's own CPU and its dispatch lag are recorded with
+ *     every step, and a step where it saturates is marked unreliable rather than reported.
+ *   - PER-TARGET CPU. The target's cgroups are read at every step boundary, so efficiency can
  *     be reported per unit of work rather than only as wall-clock throughput.
  *   - RAW SAMPLES RETAINED. Every observation is written out so intervals can be applied
- *     later without re-running.
+ *     later without re-running. The record is rewritten after every step, so a generator
+ *     that dies keeps the steps it finished.
  *   - COLD / WARM / HOT are three different numbers and all three are worth reporting.
  *
  * NOT yet implemented, and therefore NOT claimed: CPU clock pinning and cycle-normalized
  * efficiency (ops per CPU-gigacycle). Without pinning, any efficiency figure from this
- * harness is wall-clock bound and must not be published. See bench/README.md.
+ * harness is wall-clock bound and must not be published. Each step carries its wall-clock
+ * start and end so host-side cycle samples (tier 2) can be joined to it. See bench/README.md.
  *
  *   node bench/run.mjs --rates 50,100,200,400 --duration 20
  */
-import { writeFile, mkdir } from 'node:fs/promises';
+import { writeFile, mkdir, readFile } from 'node:fs/promises';
+import { Agent, request as httpRequest } from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { join } from 'node:path';
 import { cpus, totalmem, platform, release } from 'node:os';
-import { makeRequestFactory, makeWriterFactory, sampleIds } from './workload.mjs';
+import { makeRequestFactory, makeWriterFactory, planWrites, sampleIds, stream, writeKeys } from './workload.mjs';
+import { accountStep, readAll, resolveCgroups } from './cgroups.mjs';
+import { ACCESS_SKEW, PUBLISHED_RUN, SCRAMBLE_SEED, WARMUP } from '@ecommerce-store/spec';
 
 const execFileAsync = promisify(execFile);
 
@@ -40,6 +45,13 @@ const execFileAsync = promisify(execFile);
  * such rather than silently reported as the commit it is based on.
  */
 async function codeVersion() {
+	// The generator image has no git; the orchestrator reads it on the host and passes it in.
+	// `commit` is the target's application code; `harness` is the checkout that drove it, which
+	// differs when the orchestrator built the target from another commit (TARGET_REF).
+	if (process.env.CODE_COMMIT) {
+		const harness = process.env.HARNESS_COMMIT ? { commit: process.env.HARNESS_COMMIT, dirty: process.env.HARNESS_DIRTY === '1' } : null;
+		return { commit: process.env.CODE_COMMIT, dirty: process.env.CODE_DIRTY === '1', harness };
+	}
 	try {
 		const { stdout: sha } = await execFileAsync('git', ['rev-parse', 'HEAD']);
 		const { stdout: dirty } = await execFileAsync('git', ['status', '--porcelain']);
@@ -55,32 +67,23 @@ const argOf = (name, fallback) => {
 };
 
 const BASE_URL = argOf('url', 'http://localhost:9926');
-const OPS_URL = argOf('ops', 'http://localhost:9925');
-/**
- * Credentials for the background write stream.
- *
- * `harper dev` disables auth; `harper run` — the only supported benchmark configuration —
- * does not. Without these every write 401s, `fetch` resolves normally, nothing checks the
- * status, and the run record still reports `writesIssued`. The entire SPEC.md#background-writes
- * cache-coherence workload silently does not happen.
- */
-const OPS_AUTH = process.env.HDB_ADMIN_USERNAME
-	? `Basic ${Buffer.from(`${process.env.HDB_ADMIN_USERNAME}:${process.env.HDB_ADMIN_PASSWORD ?? ''}`).toString('base64')}`
-	: null;
 const SCALE = argOf('scale', 'dev');
 // Scale-aware: `dev` is committed raw, `bench` is expanded by scripts/prepare-dataset.mjs.
-// The old default pointed at the pre-split layout and simply did not exist.
 const DATASET = argOf('dataset', SCALE === 'dev'
 	? join(import.meta.dirname, '..', 'dataset', 'dev')
 	: join(import.meta.dirname, '..', '.work', 'dataset', SCALE));
 const RATES = argOf('rates', '25,50,100,200').split(',').map(Number);
 const DURATION = Number(argOf('duration', '15'));
-const WARMUP = Number(argOf('warmup', '10'));
+/** Overrides of the scale's fixed warm-up (WARMUP in @ecommerce-store/spec); recorded, and a mismatch fails verification. */
+const WARMUP_REQUESTS = argOf('warmup-requests', null);
+const WARMUP_RATE = argOf('warmup-rate', null);
 const QUOTE_SHARE = Number(argOf('quote-share', '0.5'));
+/** `uniform` or `poisson`; unset, `bench` takes PUBLISHED_RUN.arrivals and `dev` stays uniform. */
+const ARRIVALS_ARG = argOf('arrivals', null);
 const WRITE_RATE = Number(argOf('write-rate', '20'));
 const OUT = argOf('out', join(import.meta.dirname, 'results'));
 /**
- * Ceiling on concurrent in-flight requests.
+ * Ceiling on concurrent in-flight READS.
  *
  * An open model offers arrivals regardless of completions, so once the target saturates the
  * in-flight set grows without bound and the GENERATOR dies first — a harness failure
@@ -90,51 +93,124 @@ const OUT = argOf('out', join(import.meta.dirname, 'results'));
  *
  * 750, not 4000. At 4000 the generator held four thousand concurrent responses from a
  * saturated target — product aggregates run to tens of kilobytes at bench scale — and died
- * of heap exhaustion at ~507 MB, which is Node's default cap inside a 1 GiB container. The
- * ceiling is also a measurement choice, not just a safety valve: a target serving ~150 rps
- * with sub-second latency has ~150 requests outstanding at steady state, so a ceiling of
- * 4000 queues twenty-five seconds of work and measures the generator's queue rather than
- * the target.
+ * of heap exhaustion at ~507 MB, which is Node's default cap inside a 1 GiB container.
+ *
+ * Writes are outside the ceiling: they are a fixed, low-rate stream that WRITE-004 requires
+ * to be identical for every target, so they are neither shed nor deferred behind reads.
  */
 const MAX_IN_FLIGHT = Number(argOf('max-in-flight', '750'));
+/** A write still outstanding after this is a failure, not a write that never happened. */
+const WRITE_TIMEOUT_MS = 30_000;
+/** How long a step waits for its tail before abandoning it. */
+const DRAIN_MS = 30_000;
+/** A pause between steps, so one step's abandoned server-side work does not land in the next. */
+const QUIESCE_MS = 2_000;
 /**
  * Cold start, measured by the orchestrator (it owns the restart) and passed in, so the three
  * numbers the run lifecycle wants — cold, warm, hot — all land in one record. Only reporting
  * the hot number hides how long a system takes to become useful.
  */
 const COLD_MS = argOf('cold-ms', null);
+/**
+ * The target's cgroups, as `name=containerId` or `name=/cgroup/path`, comma-separated.
+ *
+ * Target CPU used to come from `ps` inside the generator, which cannot see the target's
+ * processes from its own container — and the image has no `ps`, so every container run
+ * recorded `targetCpuSeconds: null`. Had `ps` existed, the `grep -i harper` would have matched
+ * the generator's own command line (`--url http://harper:9926`) and reported ITS CPU as the
+ * target's. Read from cgroups instead; see bench/cgroups.mjs.
+ */
+const TARGET_CGROUPS = (argOf('target-cgroups', process.env.TARGET_CGROUPS ?? '') || '').split(',').filter(Boolean);
+/**
+ * Run conditions the generator cannot see from inside its container — platform version,
+ * image, budget, placement, tier, snapshot — recorded by the orchestrator and passed in.
+ */
+const ORCHESTRATOR_CONDITIONS = process.env.RUN_CONDITIONS ? JSON.parse(process.env.RUN_CONDITIONS) : null;
+/** Dispatch lag beyond this means the open-loop schedule slipped: the generator, not the target. */
+const DISPATCH_LAG_FLAG_MS = 5;
+/**
+ * A step whose in-window throughput falls below this share of the offered rate did not keep
+ * up, whether or not its backlog grew far enough to shed.
+ */
+const SATURATION_SHARE = 0.95;
+/**
+ * Request headers. `identity` explicitly: fetch otherwise offers gzip and deflate, so a target
+ * that compressed would pay CPU the others do not and be decoded here without trace.
+ * Responses that come back encoded anyway are counted.
+ */
+const READ_HEADERS = { 'accept-encoding': 'identity' };
+const WRITE_HEADERS = { 'accept-encoding': 'identity', 'content-type': 'application/json' };
+/**
+ * A fixed pool of keep-alive connections, all opened before the warm-up, used in rotation.
+ *
+ * fetch opened connections only as concurrency demanded, and reused the most recent free one,
+ * so at ladder concurrency a handful of connections carried the run. A target whose worker
+ * threads share a port by SO_REUSEPORT gets each connection pinned to one worker by the kernel:
+ * measured on Harper with two workers, one did twice the other's work, and the busier one
+ * saturates while the other idles. Real traffic arrives on many connections. A single-process
+ * target is indifferent to this, so the policy is neutral; it is recorded with the run.
+ */
+const CONNECTIONS = Number(argOf('connections', '32'));
+const agent = new Agent({ keepAlive: true, maxSockets: CONNECTIONS, scheduling: 'fifo' });
 
-/** Resident CPU time of the target process, so per-step CPU can be attributed. */
-async function targetCpuSeconds(pid) {
-	if (!pid) return null;
-	try {
-		const { stdout } = await execFileAsync('ps', ['-o', 'time=', '-p', String(pid)]);
-		// macOS prints mm:ss.cc, Linux hh:mm:ss, and either may carry a dd- day prefix. The
-		// previous split-on-[:.] mapped Linux hours onto minutes and dropped the real seconds,
-		// so every committed run recorded targetCpuSeconds: 0 — a methodology requirement
-		// silently reporting garbage.
-		const match = stdout.trim().match(/^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)(?:\.(\d+))?$/);
-		if (!match) return null;
-		const [, d = 0, h = 0, m, sec, frac] = match;
-		return Number(d) * 86400 + Number(h) * 3600 + Number(m) * 60 + Number(sec) + Number(`0.${frac ?? 0}`);
-	} catch {
-		return null;
-	}
-}
-
-async function findHarperPid() {
-	try {
-		const { stdout } = await execFileAsync('bash', ['-lc', "ps -A -o pid=,command= | grep -i 'harper' | grep -v grep | head -1"]);
-		const pid = Number(stdout.trim().split(/\s+/)[0]);
-		return Number.isInteger(pid) ? pid : null;
-	} catch {
-		return null;
-	}
+/** One HTTP exchange on the pool. The body is counted, and kept only when asked for. */
+function send(url, { method = 'GET', headers, body, signal, keepBody = false }) {
+	return new Promise((resolve, reject) => {
+		const outgoing = httpRequest(
+			url,
+			{ method, agent, signal, headers: body === undefined ? headers : { ...headers, 'content-length': Buffer.byteLength(body) } },
+			(response) => {
+				let bytes = 0;
+				const chunks = keepBody ? [] : null;
+				response.on('data', (chunk) => {
+					bytes += chunk.length;
+					chunks?.push(chunk);
+				});
+				response.on('end', () => resolve({ status: response.statusCode, headers: response.headers, bytes, body: chunks && Buffer.concat(chunks) }));
+				response.on('error', reject);
+			}
+		);
+		outgoing.on('error', reject);
+		outgoing.end(body);
+	});
 }
 
 // Nearest-rank. The Math.max guards q=0, which would otherwise index -1.
 const quantile = (sorted, q) =>
 	sorted.length ? sorted[Math.max(0, Math.min(sorted.length - 1, Math.ceil(q * sorted.length) - 1))] : NaN;
+
+/** The `cache` entry of a Server-Timing header: 1 hit, 0 miss, null absent. */
+function cacheStatus(serverTiming) {
+	const desc = serverTiming?.match(/(?:^|,)\s*cache\s*;(?:[^,]*;)?\s*desc\s*=\s*"?(\w+)"?/)?.[1];
+	return desc === 'hit' ? 1 : desc === 'miss' ? 0 : null;
+}
+
+/**
+ * Arrival times for one step, in ms from its start, one per call.
+ *
+ * `uniform`: arrival k at k × interval. `poisson`: exponential gaps with the same mean, drawn
+ * from a stream seeded by the step's label, so every target is offered the same times. Its own
+ * stream: the key draws are unchanged whichever process is chosen.
+ */
+function arrivalSchedule(kind, interval, label) {
+	if (kind === 'uniform') {
+		let k = 0;
+		return () => k++ * interval;
+	}
+	let seed = 0x811c9dc5 ^ ARRIVAL_SEED;
+	for (const char of label) seed = Math.imul(seed ^ char.charCodeAt(0), 0x01000193);
+	const next = stream(seed);
+	let at = 0;
+	let first = true;
+	return () => {
+		if (first) {
+			first = false;
+			return 0;
+		}
+		at += -Math.log(1 - next()) * interval;
+		return at;
+	};
+}
 
 /**
  * Drive one step of the ladder at a constant arrival rate.
@@ -148,6 +224,7 @@ async function step({ rate, seconds, nextRequest, nextWrite, writeRate, label })
 	// Per-step, so abandoning a saturated step's tail cannot touch the next one.
 	const abort = new AbortController();
 	const startedAt = performance.now();
+	const startedAtEpochMs = Date.now();
 	const cpuBefore = process.cpuUsage();
 
 	let issued = 0;
@@ -155,50 +232,48 @@ async function step({ rate, seconds, nextRequest, nextWrite, writeRate, label })
 	let shed = 0;
 	let writeFailures = 0;
 	let invalidations = 0;
+	let encodedResponses = 0;
 	const totalRequests = Math.round(rate * seconds);
 	const totalWrites = Math.round(writeRate * seconds);
 
 	const issue = async (request) => {
 		const t0 = performance.now();
 		try {
-			const response = await fetch(request.url, {
+			// The body is read to completion WITHOUT being retained. Abandoning it would destroy
+			// the socket rather than return it to the pool, so every request would pay TCP setup;
+			// it would also end the sample at headers, counting a truncated response as a success
+			// and understating latency for any slow body.
+			const response = await send(request.url, {
 				signal: abort.signal,
 				method: request.method,
-				headers: request.method === 'POST' ? { 'content-type': 'application/json' } : undefined,
+				headers: request.method === 'POST' ? WRITE_HEADERS : READ_HEADERS,
 				body: request.method === 'POST' ? '{}' : undefined,
 			});
-			// Stream the body to completion WITHOUT retaining it. Cancelling the stream
-			// instead destroys the socket rather than returning it to the keep-alive pool, so
-			// every request paid TCP setup and the run measured connection churn; it also
-			// ended the sample at headers, counting a truncated response as a success and
-			// understating latency for any slow body.
-			const serverTiming = response.headers.get('server-timing') ?? null;
-			let bytes = 0;
-			if (response.body) {
-				const reader = response.body.getReader();
-				try {
-					for (let chunk; !(chunk = await reader.read()).done; ) bytes += chunk.value.byteLength;
-				} finally {
-					reader.releaseLock();
-				}
-			}
+			const serverTiming = response.headers['server-timing'] ?? null;
+			if (response.headers['content-encoding']) encodedResponses++;
+			const bytes = response.bytes;
+			const doneAt = performance.now();
 			samples.push({
 				kind: request.kind,
 				// The cache status is reduced to a flag here rather than retaining the whole
 				// Server-Timing string per sample: at hundreds of thousands of samples the
 				// strings are the largest thing the generator holds, and only the flag is read.
-				cacheHit: serverTiming?.includes('cache;desc=hit') ? 1 : serverTiming?.includes('cache;desc=miss') ? 0 : null,
-				ms: performance.now() - t0,
+				cacheHit: cacheStatus(serverTiming),
+				ms: doneAt - t0,
 				// Service time excludes the wait between an arrival's SCHEDULED time and its
 				// dispatch. Reporting only service time is coordinated omission in a harness
 				// whose entire claim is that it is open, so the scheduled-to-complete figure is
 				// carried alongside and is what the ladder reports.
-				arrivalMs: performance.now() - request.scheduledAt,
+				arrivalMs: doneAt - request.scheduledAt,
+				// Completion time from the step's start, so throughput can be counted inside the
+				// offer window rather than credited for work drained after it.
+				doneMs: doneAt - startedAt,
 				status: response.status,
 				bytes,
 			});
 		} catch (error) {
-			samples.push({ kind: request.kind, ms: performance.now() - t0, arrivalMs: performance.now() - request.scheduledAt, status: 0, error: String(error.message ?? error) });
+			const doneAt = performance.now();
+			samples.push({ kind: request.kind, ms: doneAt - t0, arrivalMs: doneAt - request.scheduledAt, doneMs: doneAt - startedAt, status: 0, error: String(error.message ?? error) });
 		}
 	};
 
@@ -213,54 +288,64 @@ async function step({ rate, seconds, nextRequest, nextWrite, writeRate, label })
 	 */
 	const TICK_MS = 2;
 	const requestInterval = 1000 / rate;
+	const nextArrivalAt = arrivalSchedule(ARRIVALS, requestInterval, label);
+	let arrivalAt = nextArrivalAt();
 	const writeInterval = writeRate > 0 ? 1000 / writeRate : Infinity;
 
 	const postWrite = async (write) => {
 		try {
-			const response = await fetch(write.url, {
+			const response = await send(write.url, {
 				method: 'POST',
-				headers: { 'content-type': 'application/json' },
+				headers: WRITE_HEADERS,
 				body: JSON.stringify(write.body),
+				signal: AbortSignal.any([abort.signal, AbortSignal.timeout(WRITE_TIMEOUT_MS)]),
+				keepBody: true,
 			});
-			const result = await response.json();
-			// A write that landed but invalidated nothing did not do the job either: the cache
-			// would serve the old value until expiry. Writes are not timed, but they must be
-			// COUNTED — a run whose writes all failed is not the run it claims to be.
-			if (!response.ok) writeFailures++;
-			else invalidations += result.invalidated ?? 0;
+			// Writes are not timed, but they must be COUNTED — a run whose writes all failed is
+			// not the run it claims to be. A write that never completes counts as failed.
+			if (response.status < 200 || response.status >= 300) writeFailures++;
+			else invalidations += JSON.parse(response.body.toString()).invalidated ?? 0;
 		} catch {
 			writeFailures++;
 		}
 	};
 
-	const track = (promise) => {
+	const reads = new Set();
+	const track = (promise, isRead) => {
 		inFlight.add(promise);
-		promise.finally(() => inFlight.delete(promise));
+		if (isRead) reads.add(promise);
+		promise.finally(() => {
+			inFlight.delete(promise);
+			reads.delete(promise);
+		});
 	};
 
 	const deadline = startedAt + seconds * 1000;
-	while (performance.now() < deadline) {
+	// Exactly `totalRequests` arrivals, every one at its scheduled time. Evenly spaced, the last
+	// falls inside the window; Poisson arrivals may run a little past it, and the offer window
+	// then ends at the last arrival rather than cutting the schedule short.
+	while (issued < totalRequests || performance.now() < deadline) {
 		const elapsed = performance.now() - startedAt;
-		const dueRequests = Math.min(totalRequests, Math.floor(elapsed / requestInterval));
-		while (issued < dueRequests) {
-			if (inFlight.size >= MAX_IN_FLIGHT) {
-				// Count every arrival we could not offer, then jump the cursor so the backlog
-				// does not replay as a burst the moment capacity frees up.
-				shed += dueRequests - issued;
-				issued = dueRequests;
-				break;
+		// An arrival is due once its scheduled time has passed. Counting floor(elapsed / interval)
+		// dispatched every arrival one full interval after the time it is measured from — 40 ms
+		// of phantom latency on every request at 25 rps, 5 ms at 200, shrinking as the rate
+		// rises, which read as a target that got faster under load.
+		while (issued < totalRequests && arrivalAt <= elapsed) {
+			const request = nextRequest();
+			if (reads.size >= MAX_IN_FLIGHT) {
+				// A shed arrival still consumes its draw, so the key sequence stays identical for
+				// every target however much each one sheds.
+				shed++;
+			} else {
+				track(issue({ ...request, scheduledAt: startedAt + arrivalAt }), true);
 			}
-			track(issue({ ...nextRequest(), scheduledAt: startedAt + issued * requestInterval }));
 			issued++;
+			arrivalAt = nextArrivalAt();
 		}
 		if (writeRate > 0) {
-			const dueWrites = Math.min(totalWrites, Math.floor(elapsed / writeInterval));
+			const dueWrites = Math.min(totalWrites, Math.floor(elapsed / writeInterval) + 1);
 			while (writesIssued < dueWrites) {
-				// Writes share the ceiling but must not monopolize it: without this check a
-				// stalled operations API filled every slot, reads were shed 100%, and the
-				// result reported that as target READ saturation.
-				if (inFlight.size >= MAX_IN_FLIGHT) break;
-				track(postWrite(nextWrite()));
+				track(postWrite(nextWrite()), false);
 				writesIssued++;
 			}
 		}
@@ -271,163 +356,303 @@ async function step({ rate, seconds, nextRequest, nextWrite, writeRate, label })
 	// by offer + drain deflated the 2400 rps step to a reported 1385 rps and diluted
 	// generator CPU by the same factor, which could let a saturated generator pass its own
 	// headroom check.
-	const offerSeconds = (performance.now() - startedAt) / 1000;
+	const offerMs = performance.now() - startedAt;
+	const offerSeconds = offerMs / 1000;
+	const offerEndEpochMs = Date.now();
+	const cpu = process.cpuUsage(cpuBefore);
+	const readsInFlightAtOfferEnd = reads.size;
 
 	// Drain whatever is still outstanding. Requests that never land are abandoned here, and
 	// counted — if they were allowed to run on, they would complete during the NEXT step and
 	// be attributed to a rate they were never offered at.
-	const drainDeadline = performance.now() + 30_000;
+	const drainDeadline = performance.now() + DRAIN_MS;
 	while (inFlight.size > 0 && performance.now() < drainDeadline) {
 		await Promise.race([...inFlight, new Promise((r) => setTimeout(r, 100))]);
 	}
+	const outstanding = reads.size;
 	abort.abort();
+	// Let the aborted requests record their samples before anything is counted, or the raw
+	// samples and the summary disagree.
+	await Promise.allSettled([...inFlight]);
+	const drainEndEpochMs = Date.now();
 
-	const wall = (performance.now() - startedAt) / 1000;
-	const cpu = process.cpuUsage(cpuBefore);
 	const generatorCpuSeconds = (cpu.user + cpu.system) / 1e6;
-
 	const ok = samples.filter((s) => s.status >= 200 && s.status < 300);
-	// Measured, not assumed. WRITE-003 forbids achieving freshness by disabling caching, and
-	// a hit rate of zero is exactly what that looks like in the numbers.
-	const cacheable = ok.filter((s) => s.cacheHit !== null && s.cacheHit !== undefined);
-	const hits = cacheable.filter((s) => s.cacheHit === 1).length;
+	const okInWindow = ok.filter((s) => s.doneMs <= offerMs).length;
+	// Product responses only: the quote is never response-cacheable and always reports `miss`,
+	// so pooling it capped the rate at 1 - quoteShare and made it depend on how a stack labels
+	// an uncacheable response. WRITE-003 forbids freshness by disabling caching; a product hit
+	// rate of zero is what that looks like.
+	const productCache = ok.filter((s) => s.kind === 'product' && s.cacheHit !== null && s.cacheHit !== undefined);
+	const hits = productCache.filter((s) => s.cacheHit === 1).length;
 	// Reported latency is SCHEDULED-arrival to completion. Service time is kept too, and a
 	// large gap between them means the generator queued, not that the target was slow.
 	const latencies = ok.map((s) => s.arrivalMs ?? s.ms).sort((a, b) => a - b);
 	const serviceLatencies = ok.map((s) => s.ms).sort((a, b) => a - b);
-	const outstanding = inFlight.size;
+	// Scheduled arrival to dispatch, for every sample. The open model's claim is that requests
+	// leave on schedule whatever the target does; a lag here is the generator falling behind.
+	const dispatchLags = samples.map((s) => s.arrivalMs - s.ms).sort((a, b) => a - b);
+	// Successful throughput, counted INSIDE the offer window. Counting completions drained
+	// after it credited a target that fell behind with the rate it was offered: at capacity 150
+	// against 200 offered, a backlog under the shed ceiling drained in time to report 200.
+	const achievedRate = okInWindow / offerSeconds;
 
 	return {
 		label,
 		offeredRate: rate,
 		seconds,
+		// Wall-clock boundaries, so samples taken outside the generator (cgroup CPU, perf
+		// cycles on tier 2) can be joined to the step they belong to.
+		startedAtEpochMs,
+		offerEndEpochMs,
+		drainEndEpochMs,
 		// `issued` counts arrivals actually offered; shed arrivals are reported separately and
 		// are NOT folded in, so the two always sum to what the schedule called for.
 		issued: issued - shed,
 		shed,
 		writesIssued,
 		writeFailures,
-		// Cache entries invalidated by this step's writes. The invalidation fan-out is the cost
-		// SPEC.md#background-writes exists to measure, so it is recorded rather than inferred.
+		// Invalidations the write surface reported for this step's writes — as each
+		// implementation defines `invalidated`, which SPEC.md does not yet.
 		invalidations,
-		// Requests still outstanding when the drain deadline expired. They are absent from the
-		// latency distribution, so a non-zero value means the tail is censored.
+		// Reads in flight when the offer window closed, and still outstanding when the drain
+		// deadline expired. The second are absent from the latency distribution: the tail is
+		// censored.
+		readsInFlightAtOfferEnd,
 		outstandingAtDeadline: outstanding,
 		completed: samples.length,
 		ok: ok.length,
+		okInWindow,
 		errors: samples.length - ok.length + shed,
+		encodedResponses,
 		offerSeconds,
-		// Successful throughput, over the OFFER window.
-		achievedRate: ok.length / offerSeconds,
+		achievedRate,
 		completionRate: samples.length / offerSeconds,
 		p50: quantile(latencies, 0.5),
 		p90: quantile(latencies, 0.9),
 		p99: quantile(latencies, 0.99),
 		max: latencies.at(-1) ?? NaN,
-		cacheObserved: cacheable.length,
-		cacheHitRate: cacheable.length ? hits / cacheable.length : null,
+		cacheObserved: productCache.length,
+		cacheHitRate: productCache.length ? hits / productCache.length : null,
 		p50Service: quantile(serviceLatencies, 0.5),
 		p99Service: quantile(serviceLatencies, 0.99),
+		dispatchLagP50: quantile(dispatchLags, 0.5),
+		dispatchLagP99: quantile(dispatchLags, 0.99),
+		dispatchLagMax: dispatchLags.at(-1) ?? NaN,
 		generatorCpuSeconds,
-		// One core's worth of the generator's own budget, over the OFFER window. Past ~0.8 the
-		// generator is a plausible bottleneck and the step must not be reported as a target
-		// measurement.
+		// One core's worth of the generator's own budget, over the OFFER window (CPU read at
+		// offer end). Past ~0.8 the generator is a plausible bottleneck and the step must not be
+		// reported as a target measurement.
 		generatorCpuLoad: generatorCpuSeconds / offerSeconds,
-		// A step that shed arrivals exceeded the target's capacity; its achieved rate is a
-		// lower bound on throughput, not a measurement of it.
-		saturated: shed > 0,
+		// Beyond capacity: arrivals were shed, or the target completed too little inside the
+		// window. Either way the achieved rate is a floor, not a measurement.
+		saturated: shed > 0 || achievedRate < SATURATION_SHARE * rate,
 		samples,
 	};
 }
 
 // --- run ---------------------------------------------------------------------------------
 
-const manifest = JSON.parse(await (await fetch(`file://${join(DATASET, 'MANIFEST.json')}`).catch(() => null))?.text?.() ?? 'null')
-	?? JSON.parse(await (await import('node:fs/promises')).readFile(join(DATASET, 'MANIFEST.json'), 'utf8'));
+const manifest = JSON.parse(await readFile(join(DATASET, 'MANIFEST.json'), 'utf8'));
 
 console.log(`target ${BASE_URL} · dataset scale ${manifest.scale} seed ${manifest.seed}`);
 console.log(`${cpus().length} cpus · ${(totalmem() / 1024 ** 3).toFixed(1)} GiB · ${platform()} ${release()}\n`);
 
-// Sampled with a stride across each full table, so the reachable working set spans the whole
-// catalog rather than its first 20,000 rows. Row counts come from the manifest.
+// Every cart and every product id is reachable: a sample of 20,000 per table kept the `bench`
+// working set inside the target's memory, so DATA-004 could not hold. Row counts come from the
+// manifest. The write stream is planned up front from the product draws, so only the planned
+// products' variants and inventory are loaded (WRITE-001).
 const rows = manifest.files;
-console.log('sampling workload keys across the full dataset…');
-const [cartIds, productIds, skus, inventoryIds] = await Promise.all([
-	sampleIds(DATASET, 'cart', 'id', 20_000, rows.cart?.rows),
-	sampleIds(DATASET, 'product', 'id', 20_000, rows.product?.rows),
-	sampleIds(DATASET, 'variant', 'sku', 20_000, rows.variant?.rows),
-	sampleIds(DATASET, 'inventory', 'id', 20_000, rows.inventory?.rows),
+console.log('loading every cart and product id…');
+const [cartIds, productIds] = await Promise.all([
+	sampleIds(DATASET, 'cart', 'id', rows.cart?.rows, rows.cart?.rows),
+	sampleIds(DATASET, 'product', 'id', rows.product?.rows, rows.product?.rows),
 ]);
 
-const nextRequest = makeRequestFactory({ baseUrl: BASE_URL, cartIds, productIds, quoteShare: QUOTE_SHARE });
-const nextWrite = makeWriterFactory({ baseUrl: BASE_URL, skus, inventoryIds });
-const pid = await findHarperPid();
+const REQUEST_SEED = 1;
+const WRITE_SEED = 7;
+const ARRIVAL_SEED = 11;
+const ARRIVALS = ARRIVALS_ARG ?? (manifest.scale === 'bench' ? PUBLISHED_RUN.arrivals : 'uniform');
+if (ARRIVALS !== 'uniform' && ARRIVALS !== 'poisson') throw new Error(`--arrivals must be uniform or poisson, not ${ARRIVALS}`);
+const warmupDefault = WARMUP[manifest.scale] ?? WARMUP.dev;
+const warmup = {
+	requests: WARMUP_REQUESTS === null ? warmupDefault.requests : Number(WARMUP_REQUESTS),
+	rate: WARMUP_RATE === null ? warmupDefault.rate : Number(WARMUP_RATE),
+	policy: `fixed, ${WARMUP[manifest.scale] ? manifest.scale : 'dev'} default${WARMUP_REQUESTS === null && WARMUP_RATE === null ? '' : ', overridden'}`,
+};
+warmup.seconds = warmup.requests / warmup.rate;
+
+// Exactly the writes the warm-up and the ladder will issue.
+const plannedWrites = [warmup.seconds, ...RATES.map(() => DURATION)].reduce((sum, seconds) => sum + Math.round(WRITE_RATE * seconds), 0);
+const plan = planWrites({ productCount: productIds.length, total: Math.max(1, plannedWrites), seed: WRITE_SEED });
+const keys = await writeKeys(DATASET, [...new Set(plan.map((write) => productIds[write.productIndex]))]);
+const nextRequest = makeRequestFactory({ baseUrl: BASE_URL, cartIds, productIds, quoteShare: QUOTE_SHARE, seed: REQUEST_SEED });
+const nextWrite = makeWriterFactory({ baseUrl: BASE_URL, plan, productIds, keys });
+
+/**
+ * The generator's own memory, measured: it holds every cart and product id and must stay
+ * inside its 1 GiB. Peak RSS is sampled after setup and after every step; the container's
+ * cgroup high-water mark is read when the cgroup exposes it.
+ */
+const generatorMemory = { rssPeakBytes: 0, heapUsedPeakBytes: 0, cgroupPeakBytes: null, cgroupLimitBytes: null };
+async function sampleGeneratorMemory() {
+	const usage = process.memoryUsage();
+	generatorMemory.rssPeakBytes = Math.max(generatorMemory.rssPeakBytes, usage.rss);
+	generatorMemory.heapUsedPeakBytes = Math.max(generatorMemory.heapUsedPeakBytes, usage.heapUsed);
+	for (const [field, file] of [['cgroupPeakBytes', 'memory.peak'], ['cgroupLimitBytes', 'memory.max']]) {
+		try {
+			const value = Number((await readFile(`/sys/fs/cgroup/${file}`, 'utf8')).trim());
+			if (Number.isFinite(value)) generatorMemory[field] = value;
+		} catch {}
+	}
+}
+await sampleGeneratorMemory();
+console.log(`keys: ${cartIds.length} carts, ${productIds.length} products; ${plan.length} planned writes over ${keys.products} products; generator RSS ${(generatorMemory.rssPeakBytes / 2 ** 20).toFixed(0)} MiB`);
+const cgroups = await resolveCgroups(TARGET_CGROUPS);
+for (const cgroup of cgroups) {
+	console.log(`target cgroup ${cgroup.name}: ${cgroup.dir ?? `UNRESOLVED (${cgroup.ref}) — target CPU will be null`}`);
+}
+if (!cgroups.length) console.log('no target cgroups given — target CPU will be null');
+
+const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+const file = join(OUT, `run-${stamp}.json`);
+await mkdir(OUT, { recursive: true });
+const code = await codeVersion();
+console.log(`run record: ${file}`);
+
+/** Derived from what the orchestrator recorded, not hardcoded. Tier 1 is signal, never results. */
+function caveats() {
+	const tier = ORCHESTRATOR_CONDITIONS?.tier ?? null;
+	const list = [];
+	if (tier !== 2) {
+		list.push(`Tier ${tier ?? 'unknown'}: CPU clock neither pinned nor measured — no cycle-normalized efficiency figure may be derived from this run.`);
+	} else {
+		list.push('Tier 2: clock bounded and measured on the host, not pinned. Cycle figures are joined into each step from host samples by bench/cycles.mjs; a published figure says "all-core turbo, measured at N GHz".');
+	}
+	if (manifest.scale !== 'bench') list.push(`Dataset "${manifest.scale}" fits in memory: not a benchmark result (DATA-004).`);
+	if (!cgroups.length || cgroups.some((cgroup) => !cgroup.dir)) list.push('Target CPU was not accounted for every target cgroup; targetCpuSeconds is null.');
+	list.push('Generator shares a host with the target; see generatorCpuLoad and dispatchLagP99 per step.');
+	return list;
+}
+
+/**
+ * Write the record — after every step, not only at the end, so a generator that dies keeps
+ * what it measured. The first bench attempt lost every raw sample to a heap exhaustion in its
+ * fourth step. `complete` says whether the ladder finished.
+ */
+async function writeRecord(warm, steps, complete) {
+	await writeFile(
+		file,
+		JSON.stringify(
+			{
+				complete,
+				// Exact run conditions, recorded with the result — not reconstructed later.
+				conditions: {
+					code,
+					target: BASE_URL,
+					dataset: { scale: manifest.scale, seed: manifest.seed, generatorVersion: manifest.generatorVersion, files: manifest.files },
+					// The generator's own view: its container's CPUs and the guest kernel, not the
+					// target's budget. The target's budget and placement are in `orchestrator`.
+					generatorHost: {
+						cpus: cpus().length, model: cpus()[0]?.model, totalmemGiB: +(totalmem() / 1024 ** 3).toFixed(1),
+						platform: platform(), release: release(), node: process.versions.node, undici: process.versions.undici ?? null,
+					},
+					orchestrator: ORCHESTRATOR_CONDITIONS,
+					harness: {
+						rates: RATES, quoteShare: QUOTE_SHARE, writeRate: WRITE_RATE, durationSeconds: DURATION,
+						warmup, maxInFlight: MAX_IN_FLIGHT,
+						drainMs: DRAIN_MS, quiesceMs: QUIESCE_MS, writeTimeoutMs: WRITE_TIMEOUT_MS,
+						arrivals: ARRIVALS === 'poisson'
+							? 'seeded Poisson: exponential gaps, the same times for every target; dispatched on a 2 ms tick'
+							: 'deterministic, evenly spaced, dispatched on a 2 ms tick',
+						arrivalProcess: ARRIVALS,
+						seeds: { requests: REQUEST_SEED, writes: WRITE_SEED, arrivals: ARRIVALS === 'poisson' ? ARRIVAL_SEED : null },
+						requestHeaders: READ_HEADERS,
+						connections: `${CONNECTIONS} keep-alive connections, opened before the warm-up, used least-recently-used first`,
+						keySampling: 'every key of every table',
+						accessDistribution: { form: 'scrambled discrete Zipf', exponent: ACCESS_SKEW.exponent, scrambleSeed: SCRAMBLE_SEED },
+						writeKeys: 'planned from product draws with the read distribution; variants and inventory of those products',
+						reachableKeys: { carts: cartIds.length, products: productIds.length, writeProducts: keys.products, writeSkus: keys.skus, writeInventory: keys.inventory },
+						generatorMemory,
+						targetCgroups: cgroups,
+						targetCpu: cgroups.length ? 'cgroup v2 cpu.stat usage_usec, offer start to drain end' : null,
+						cacheHitRate: 'product responses only',
+						saturation: `shed arrivals, or in-window throughput below ${SATURATION_SHARE} of offered`,
+					},
+					lifecycle: {
+						coldStartMs: COLD_MS === null ? null : Number(COLD_MS),
+						// The earliest-DISPATCHED warm-up request, not the first to complete.
+						warmupFirstResponseMs: warm ? (warm.samples.reduce((first, s) => (!first || s.doneMs - s.ms < first.doneMs - first.ms ? s : first), null)?.ms ?? null) : null,
+						warmup: warm
+							? { startedAtEpochMs: warm.startedAtEpochMs, drainEndEpochMs: warm.drainEndEpochMs, issued: warm.issued, shed: warm.shed, ok: warm.ok, errors: warm.errors }
+							: null,
+					},
+					caveats: caveats(),
+				},
+				steps,
+			},
+			null,
+			2
+		)
+	);
+}
+
+// Open the whole pool before anything is measured: one concurrent request per connection.
+await Promise.all(
+	Array.from({ length: CONNECTIONS }, (_, i) =>
+		send(`${BASE_URL}/product/${encodeURIComponent(productIds[i % productIds.length])}?tier=standard&region=us-east`, { headers: READ_HEADERS })
+	)
+);
+console.log(`opened ${CONNECTIONS} connections`);
 
 // COLD is measured by the caller restarting the target; this harness reports the first
 // observation of the warm-up step separately so the number is not silently lost.
-console.log(`warm-up ${WARMUP}s (not reported as a result)`);
-const warm = await step({ rate: RATES[0], seconds: WARMUP, nextRequest, nextWrite, writeRate: WRITE_RATE, label: 'warmup' });
-console.log(`  first response ${warm.samples[0]?.ms?.toFixed(1)}ms · ${warm.errors} errors\n`);
+console.log(`warm-up ${warmup.requests} requests at ${warmup.rate} rps, ${warmup.seconds}s (${warmup.policy}; not reported as a result)`);
+const warm = await step({ rate: warmup.rate, seconds: warmup.seconds, nextRequest, nextWrite, writeRate: WRITE_RATE, label: 'warmup' });
+console.log(`  ${warm.errors} errors\n`);
+await new Promise((resolve) => setTimeout(resolve, QUIESCE_MS));
 
-console.log('rate   offered  achieved   p50      p90      p99      max     errors  genCPU  cacheHit  inval');
-console.log('─'.repeat(100));
+console.log('rate   offered  achieved   p50      p90      p99      max     errors  genCPU  tgtCPU  cacheHit  inval  memMiB  readMiB');
+console.log('─'.repeat(124));
+
+/** A per-container figure summed over the target's cgroups, for the console. */
+const componentSum = (result, field, scale) =>
+	result.targetComponents?.length && result.targetComponents.every((c) => c[field] != null)
+		? (result.targetComponents.reduce((sum, c) => sum + c[field], 0) / scale).toFixed(0)
+		: 'n/a';
 
 const steps = [];
 for (const rate of RATES) {
-	const cpuBefore = await targetCpuSeconds(pid);
+	const cgroupsBefore = await readAll(cgroups);
 	const result = await step({ rate, seconds: DURATION, nextRequest, nextWrite, writeRate: WRITE_RATE, label: `rate-${rate}` });
-	const cpuAfter = await targetCpuSeconds(pid);
-	result.targetCpuSeconds = cpuBefore !== null && cpuAfter !== null ? cpuAfter - cpuBefore : null;
+	const cgroupsAfter = await readAll(cgroups);
+	// Over offer and drain together: the target's work for this step's arrivals ends at drain.
+	Object.assign(result, accountStep(cgroups, cgroupsBefore, cgroupsAfter));
+	result.targetCpuLoad = result.targetCpuSeconds === null ? null : result.targetCpuSeconds / ((result.drainEndEpochMs - result.startedAtEpochMs) / 1000);
 	steps.push(result);
+	await sampleGeneratorMemory();
+	await writeRecord(warm, steps, false);
 
 	let flag = result.generatorCpuLoad > 0.8 ? '  ⚠ GENERATOR saturated — not a target measurement' : '';
-	if (result.shed > 0) flag += `  ⚠ shed ${result.shed} (target over capacity)`;
+	if (result.saturated) flag += `  ⚠ saturated (shed ${result.shed}, ${result.readsInFlightAtOfferEnd} in flight at window end)`;
 	if (result.writeFailures > 0) flag += `  ⚠ ${result.writeFailures} write failures (coherence workload degraded)`;
-	if (result.cacheHitRate === 0) flag += '  ⚠ cache hit rate 0 (WRITE-003: freshness must not come from disabling caching)';
+	if (result.cacheHitRate === 0) flag += '  ⚠ product cache hit rate 0 (WRITE-003: freshness must not come from disabling caching)';
 	if (result.outstandingAtDeadline > 0) flag += `  ⚠ ${result.outstandingAtDeadline} never completed (tail censored)`;
+	if (result.dispatchLagP99 > DISPATCH_LAG_FLAG_MS) flag += `  ⚠ dispatch lag p99 ${result.dispatchLagP99.toFixed(1)}ms (generator behind schedule)`;
+	if (result.encodedResponses > 0) flag += `  ⚠ ${result.encodedResponses} compressed responses`;
 	console.log(
 		`${String(rate).padStart(5)}  ${String(result.issued).padStart(7)}  ` +
 			`${result.achievedRate.toFixed(1).padStart(8)}  ${result.p50.toFixed(1).padStart(7)}  ` +
 			`${result.p90.toFixed(1).padStart(7)}  ${result.p99.toFixed(1).padStart(7)}  ` +
 			`${result.max.toFixed(0).padStart(7)}  ${String(result.errors).padStart(6)}  ` +
 			`${result.generatorCpuLoad.toFixed(2).padStart(6)}  ` +
+			`${(result.targetCpuLoad === null ? 'n/a' : result.targetCpuLoad.toFixed(2)).padStart(6)}  ` +
 			`${(result.cacheHitRate === null ? 'n/a' : `${(result.cacheHitRate * 100).toFixed(1)}%`).padStart(8)}  ` +
-			`${String(result.invalidations).padStart(5)}${flag}`
+			`${String(result.invalidations).padStart(5)}  ` +
+			`${componentSum(result, 'memoryCurrentBytes', 2 ** 20).padStart(6)}  ${componentSum(result, 'diskReadBytes', 2 ** 20).padStart(7)}${flag}`
 	);
+	await new Promise((resolve) => setTimeout(resolve, QUIESCE_MS));
 }
 
-await mkdir(OUT, { recursive: true });
-const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-const file = join(OUT, `run-${stamp}.json`);
-await writeFile(
-	file,
-	JSON.stringify(
-		{
-			// Exact run conditions, recorded with the result — not reconstructed later.
-			conditions: {
-				code: await codeVersion(),
-				target: BASE_URL,
-				dataset: { scale: manifest.scale, seed: manifest.seed, generatorVersion: manifest.generatorVersion, files: manifest.files },
-				host: { cpus: cpus().length, model: cpus()[0]?.model, totalmemGiB: +(totalmem() / 1024 ** 3).toFixed(1), platform: platform(), release: release() },
-				harness: {
-					quoteShare: QUOTE_SHARE, writeRate: WRITE_RATE, durationSeconds: DURATION,
-					warmupSeconds: WARMUP, maxInFlight: MAX_IN_FLIGHT,
-					keySampling: 'stride across full tables',
-					reachableKeys: { carts: cartIds.length, products: productIds.length, skus: skus.length, inventory: inventoryIds.length },
-				},
-			lifecycle: {
-				coldStartMs: COLD_MS === null ? null : Number(COLD_MS),
-				warmupFirstResponseMs: warm.samples[0]?.ms ?? null,
-			},
-				caveats: [
-					'CPU clock NOT pinned — no cycle-normalized efficiency figure may be derived from this run.',
-					'Generator shares a host with the target; see generatorCpuLoad per step.',
-				],
-			},
-			steps,
-		},
-		null,
-		2
-	)
-);
+await writeRecord(warm, steps, true);
 console.log(`\nraw samples retained: ${file}`);

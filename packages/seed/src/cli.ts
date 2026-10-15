@@ -18,7 +18,7 @@ import { Rng } from './prng.ts';
 import {
 	SCALES, carts, customers, inventory, locations, products, promotions, rates, variantShape, variants,
 } from './generate.ts';
-import { ACCESS_SKEW, REGION_WEIGHTS, TIER_WEIGHTS, skewExponent } from '@ecommerce-store/spec';
+import { ACCESS_SKEW, REGION_WEIGHTS, SCRAMBLE_SEED, TIER_WEIGHTS, zipfMass } from '@ecommerce-store/spec';
 import { GENERATOR_VERSION, type DatasetManifest, type Table } from './index.ts';
 
 /**
@@ -89,7 +89,8 @@ files.variant = await writeTable(outDir, 'variant', variants(scale, counts, new 
 files.inventory = await writeTable(outDir, 'inventory', inventory(scale, counts, new Rng(`${seed}:inventory`)), compress);
 files.promotion = await writeTable(outDir, 'promotion', promotions(scale, new Rng(`${seed}:promotion`)), compress);
 files.rate = await writeTable(outDir, 'rate', rates(), compress);
-files.cart = await writeTable(outDir, 'cart', carts(scale, counts, new Rng(`${seed}:cart`)), compress);
+const cartStats = { lines: 0, headLines: 0, topLines: 0 };
+files.cart = await writeTable(outDir, 'cart', carts(scale, counts, new Rng(`${seed}:cart`), ACCESS_SKEW.headShare, cartStats), compress);
 
 const manifest: DatasetManifest = {
 	specVersion: '0.2.0-draft',
@@ -107,13 +108,24 @@ const manifest: DatasetManifest = {
 		locationsPerSku: '1-6 of 8',
 		tier: 'standard 60 / silver 25 / gold 12 / platinum 3',
 		outOfStockRate: 0.12,
-		// Fully specified: P(index < x*n) = x ** (1/alpha). Both the dataset and the load
-		// generator draw from this, so the hot products are the same on both sides.
+		// Fully specified by @ecommerce-store/spec: P(rank k) proportional to (k + 1) ** -s, rank
+		// mapped to a key by the seeded Feistel scramble. The dataset and the load generator
+		// draw from it, so the hot products are the same on both sides. Declared AND measured:
+		// `cartLines` counts what this run's carts actually hold.
 		accessSkew: {
-			form: 'power law over product index',
-			headShare: ACCESS_SKEW.headShare,
-			headMass: ACCESS_SKEW.headMass,
-			alpha: Number(skewExponent().toFixed(6)),
+			form: 'discrete Zipf over product rank, scrambled to key',
+			exponent: ACCESS_SKEW.exponent,
+			solvedFor: { headShare: ACCESS_SKEW.headShare, headMass: ACCESS_SKEW.headMass, catalogSize: ACCESS_SKEW.catalogSize },
+			scrambleSeed: SCRAMBLE_SEED,
+			expected: {
+				headMass: Number(zipfMass(scale.products, Math.floor(scale.products * ACCESS_SKEW.headShare)).toFixed(6)),
+				topKeyMass: Number(zipfMass(scale.products, 1).toFixed(6)),
+			},
+			cartLines: {
+				lines: cartStats.lines,
+				headMass: Number((cartStats.headLines / cartStats.lines).toFixed(6)),
+				topKeyMass: Number((cartStats.topLines / cartStats.lines).toFixed(6)),
+			},
 		},
 		requestTierWeights: Object.fromEntries(TIER_WEIGHTS),
 		requestRegionWeights: Object.fromEntries(REGION_WEIGHTS),

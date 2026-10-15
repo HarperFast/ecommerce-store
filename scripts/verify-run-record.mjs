@@ -7,15 +7,25 @@
  * cache actually did while it ran. Forcing them into the HTTP suite would produce tests that
  * assert nothing, so they are checked here, against the artifact the run emits.
  *
- *   node scripts/verify-run-record.mjs bench/results/run-....json
+ *   node scripts/verify-run-record.mjs [--dev] bench/results/run-....json
+ *
+ * `--dev` is for development runs against the `dev` dataset, which can never satisfy
+ * DATA-004: the scale check becomes a note so the WRITE-* checks still mean something.
+ *
+ * It also checks the measurement rules a run must meet to be a measurement at all (`METHOD`):
+ * target CPU accounted for every step, and no step where the generator saturated.
  *
  * COVERS: DATA-004 WRITE-001 WRITE-003 WRITE-004
  */
 import { readFile } from 'node:fs/promises';
+import { PUBLISHED_RUN, WARMUP } from '@ecommerce-store/spec';
+import { memoryPressure } from './memory-pressure.mjs';
 
-const file = process.argv[2];
+const args = process.argv.slice(2);
+const DEV = args.includes('--dev');
+const file = args.find((arg) => !arg.startsWith('--'));
 if (!file) {
-	console.error('usage: node scripts/verify-run-record.mjs <run-record.json>');
+	console.error('usage: node scripts/verify-run-record.mjs [--dev] <run-record.json>');
 	process.exit(2);
 }
 
@@ -28,17 +38,33 @@ const fail = (id, message) => failures.push(`${id}: ${message}`);
 
 // --- DATA-004: one dataset size, working set larger than memory -------------------------
 if (conditions.dataset?.scale !== 'bench') {
-	fail('DATA-004', `run used the "${conditions.dataset?.scale}" dataset; only "bench" is a benchmark target`);
+	const message = `run used the "${conditions.dataset?.scale}" dataset; only "bench" is a benchmark target`;
+	if (DEV) notes.push(`DATA-004 not checked (--dev): ${message}`);
+	else fail('DATA-004', message);
 }
 const reachable = conditions.harness?.reachableKeys;
+const tableRows = conditions.dataset?.files ?? {};
 if (!reachable) {
 	fail('DATA-004', 'the record does not state how many keys the workload could reach');
 } else {
 	notes.push(`reachable keys: ${Object.entries(reachable).map(([k, v]) => `${k}=${v}`).join(' ')}`);
+	if (!(reachable.writeSkus > 0 && reachable.writeInventory > 0)) {
+		fail('WRITE-001', 'the record does not show write keys drawn from the products the reads draw');
+	}
+	// Evidence, not a label: every cart and product must be reachable. A 20,000-key sample
+	// kept the bench working set inside the target's memory.
+	for (const [key, table] of [['carts', 'cart'], ['products', 'product']]) {
+		if (tableRows[table]?.rows && reachable[key] < tableRows[table].rows) {
+			fail('DATA-004', `${reachable[key]} of ${tableRows[table].rows} ${key} were reachable; a sample bounds the working set`);
+		}
+	}
 }
-if (conditions.harness?.keySampling !== 'stride across full tables') {
-	fail('DATA-004', `key sampling is "${conditions.harness?.keySampling}"; a prefix sample does not establish a working set`);
-}
+// The working set must not have fit: some target cgroup pressed against its own limit while
+// still reading from disk (scripts/memory-pressure.mjs, bench/README.md#data-004-memory-evidence).
+const pressure = memoryPressure(record);
+for (const line of pressure.detail) notes.push(`memory ${line}`);
+notes.push(`DATA-004 memory basis: ${pressure.basis ?? 'none met'}`);
+if (conditions.dataset?.scale === 'bench' && !pressure.holds) fail('DATA-004', pressure.reason);
 
 // --- WRITE-001 / WRITE-004: the write stream actually ran, at the configured rate --------
 const configuredRate = conditions.harness?.writeRate ?? 0;
@@ -55,8 +81,10 @@ for (const step of steps) {
 	if (step.writeFailures > 0) {
 		fail('WRITE-001', `step ${step.label} had ${step.writeFailures} failed writes — the coherence workload was degraded`);
 	}
+	// A note, not a failure: CACHE-002 allows a stack to bound staleness by expiry alone, and
+	// SPEC.md does not define `invalidated` — Harper counts keys targeted, a Redis DEL keys removed.
 	if ((step.invalidations ?? 0) === 0 && step.writesIssued > 0) {
-		fail('WRITE-001', `step ${step.label} wrote ${step.writesIssued} times and invalidated nothing`);
+		notes.push(`step ${step.label} wrote ${step.writesIssued} times and reported no invalidations`);
 	}
 }
 
@@ -66,6 +94,89 @@ for (const step of steps) {
 		fail('WRITE-003', `step ${step.label} observed no cache status; hit rate cannot be established`);
 	} else if (step.cacheHitRate === 0) {
 		fail('WRITE-003', `step ${step.label} had a 0% cache hit rate — freshness must not come from disabling caching`);
+	}
+}
+
+// --- METHOD: measurement rules, not requirements --------------------------------------------
+if (record.complete !== true) fail('METHOD', 'the ladder did not finish; this record holds only the steps completed before the generator stopped');
+const ladder = conditions.harness?.rates;
+if (Array.isArray(ladder) && ladder.length !== steps.length) {
+	fail('METHOD', `the ladder had ${ladder.length} rates and the record ${steps.length} steps`);
+}
+if (!conditions.orchestrator) fail('METHOD', 'no orchestrator conditions: not a container run with a fixed budget, restore, and cold start');
+else if (conditions.orchestrator.coldStart?.ms == null) fail('METHOD', 'no cold-start measurement');
+else if (!conditions.orchestrator.preStartHook && conditions.dataset?.scale === 'bench') {
+	fail('METHOD', 'no page-cache drop before the cold start: the target read data the restore cached outside its budget');
+}
+// The warm-up is fixed per scale and identical for every target (run lifecycle): a target given
+// a shorter one is measured with a colder cache than the others.
+const expectedWarmup = WARMUP[conditions.dataset?.scale] ?? WARMUP.dev;
+const warmup = conditions.harness?.warmup;
+const warmed = conditions.lifecycle?.warmup;
+if (!warmup || warmup.requests !== expectedWarmup.requests || warmup.rate !== expectedWarmup.rate) {
+	fail('METHOD', `warm-up was ${warmup ? `${warmup.requests} requests at ${warmup.rate} rps` : 'unrecorded'}; the ${conditions.dataset?.scale} warm-up is ${expectedWarmup.requests} at ${expectedWarmup.rate}`);
+} else if (!warmed || Math.abs(warmed.issued + warmed.shed - warmup.requests) > Math.max(1, warmup.requests * 0.001)) {
+	fail('METHOD', `the warm-up offered ${warmed ? warmed.issued + warmed.shed : 'no'} of its ${warmup.requests} requests`);
+}
+// What a published (`bench`) run must use: steps long enough for the cycle join, arrivals that
+// bunch as real traffic does, and base images that cannot move between trials or sessions.
+if (conditions.dataset?.scale === 'bench') {
+	const harness = conditions.harness ?? {};
+	if (!(harness.durationSeconds >= PUBLISHED_RUN.minStepSeconds)) {
+		fail('METHOD', `steps of ${harness.durationSeconds} s; a bench run's steps are at least ${PUBLISHED_RUN.minStepSeconds} s`);
+	}
+	if (harness.arrivalProcess !== PUBLISHED_RUN.arrivals) {
+		fail('METHOD', `arrivals were ${harness.arrivalProcess ?? 'evenly spaced'}; a bench run uses ${PUBLISHED_RUN.arrivals} arrivals`);
+	}
+	const images = { ...(conditions.orchestrator?.target?.baseImages ?? {}), generator: conditions.orchestrator?.generator?.image };
+	const unpinned = Object.entries(images).filter(([, ref]) => !/@sha256:[0-9a-f]{64}$/.test(ref ?? ''));
+	if (unpinned.length) fail('METHOD', `base images not pinned by digest: ${unpinned.map(([name, ref]) => `${name}=${ref ?? 'unrecorded'}`).join(', ')}`);
+}
+// Tier 2: placement in the host's slices (application-architecture-benchmarks,
+// environments/gcp). A container left unplaced lands in system.slice on the housekeeping CPUs,
+// outside the budget and beside the Docker daemon, and still produces a plausible record.
+if (conditions.orchestrator?.tier === 2) {
+	const applied = conditions.orchestrator.target?.applied;
+	if (applied) {
+		if (applied.cgroupParent !== 'bench-target.slice') {
+			fail('METHOD', `tier 2: the target's cgroup parent is ${applied.cgroupParent ?? 'unset'}, not bench-target.slice; it ran outside the target's slice (COMPOSE_EXTRA=compose.tier2.yaml)`);
+		}
+		// A container cannot see its slice's limits, and Harper sizes its block cache and heaps
+		// from its own: without one it sizes from the whole VM.
+		if (!applied.memoryBytes) fail('METHOD', "tier 2: the target has no memory limit of its own, so it sized its caches from the whole VM's memory");
+	}
+	for (const cgroup of conditions.harness?.targetCgroups ?? []) {
+		if (cgroup.dir && !/\/bench-target\.slice(\/|$)/.test(cgroup.dir)) {
+			fail('METHOD', `tier 2: target cgroup ${cgroup.name} is ${cgroup.dir}, outside bench-target.slice`);
+		}
+	}
+	// Cycles per step, joined from the host's samples by bench/cycles.mjs. Tier 2 exists for the
+	// efficiency figure; a run without them has none.
+	const uncounted = steps.filter((step) => !(step.cycles?.target?.gigacycles > 0));
+	if (uncounted.length) {
+		fail('METHOD', `tier 2: ${uncounted.length} of ${steps.length} steps have no cycle data (${uncounted.map((step) => step.label).join(', ')}); join sample.sh's output with bench/cycles.mjs (SAMPLES_DIR)`);
+	}
+	const clock = conditions.cycles?.effectiveGHz;
+	if (clock) {
+		notes.push(`effective clock ${clock.median.toFixed(3)} GHz, ${clock.min.toFixed(3)}–${clock.max.toFixed(3)} across steps; the drift rule compares each trial with the session median`);
+	}
+}
+for (const step of steps) {
+	if (step.encodedResponses > 0) {
+		fail('METHOD', `step ${step.label}: ${step.encodedResponses} compressed responses — compression is excluded for every target`);
+	}
+	if (step.outstandingAtDeadline > 0) {
+		notes.push(`step ${step.label}: ${step.outstandingAtDeadline} requests never completed — its latency tail is censored`);
+	}
+	if (step.saturated) notes.push(`step ${step.label}: saturated — its achieved rate is a floor, not a capacity`);
+	if (step.targetCpuSeconds === null || step.targetCpuSeconds === undefined) {
+		fail('METHOD', `step ${step.label} has no target CPU figure; per-target CPU is a measurement rule`);
+	}
+	if (step.generatorCpuLoad > 0.8) {
+		fail('METHOD', `step ${step.label}: generator CPU load ${step.generatorCpuLoad.toFixed(2)} — the generator, not the target, may have been the bottleneck`);
+	}
+	if (step.dispatchLagP99 > 5) {
+		notes.push(`step ${step.label}: dispatch lag p99 ${step.dispatchLagP99.toFixed(1)}ms — arrivals left behind schedule`);
 	}
 }
 
@@ -79,7 +190,9 @@ console.log(`  dataset ${conditions.dataset?.scale} seed ${conditions.dataset?.s
 console.log(`  ${steps.length} steps, write rate ${configuredRate}/s`);
 for (const step of steps) {
 	const hit = step.cacheHitRate === null ? 'n/a' : `${(step.cacheHitRate * 100).toFixed(1)}%`;
-	console.log(`    ${String(step.label).padEnd(10)} writes ${String(step.writesIssued).padStart(5)} failed ${String(step.writeFailures ?? 0).padStart(4)} invalidated ${String(step.invalidations ?? 0).padStart(6)} cacheHit ${hit}`);
+	const cpu = step.targetCpuSeconds == null ? 'n/a' : `${step.targetCpuSeconds.toFixed(1)}s`;
+	const cycles = step.cycles ? ` Gcycles ${step.cycles.target.gigacycles.toFixed(1)} at ${step.cycles.target.effectiveGHz?.toFixed(3)} GHz, ${step.cycles.opsPerGigacycle?.toFixed(1)} ops/Gcycle` : '';
+	console.log(`    ${String(step.label).padEnd(10)} writes ${String(step.writesIssued).padStart(5)} failed ${String(step.writeFailures ?? 0).padStart(4)} invalidated ${String(step.invalidations ?? 0).padStart(6)} cacheHit ${hit} targetCpu ${cpu}${cycles}`);
 }
 for (const note of notes) console.log(`  ${note}`);
 
