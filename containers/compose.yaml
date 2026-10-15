@@ -17,6 +17,14 @@
 
 name: harper-ecommerce-bench
 
+# Base images, pinned by digest for every run: a tag moves, and a target rebuilt on another day
+# would run on another Node. Multi-arch index digests, so tier 1 (arm64) and tier 2 (x86-64)
+# resolve the same release. Recorded with every run; verify-run-record.mjs fails a `bench`
+# record without them. Update both together, deliberately, and say so in docs/plan.md.
+x-base-images:
+  node: &node-image node:24@sha256:14078204b6bb268c107ceff6d3c43f45a888105e5c2b18b14c32b3409d93a1b0
+  node-slim: &node-slim-image node:24-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5
+
 services:
   harper:
     # Tagged per build, so two builds of the target can coexist in one session: the orchestrator
@@ -28,6 +36,8 @@ services:
       dockerfile: ${TARGET_DOCKERFILE:-containers/Dockerfile}
       args:
         HARPER_VERSION: ${HARPER_VERSION:-5.3.2}
+        NODE_IMAGE: *node-image
+        NODE_SLIM_IMAGE: *node-slim-image
     networks: [bench]
     ports:
       # Published only so a human can poke at it. The measured generator talks over the
@@ -68,7 +78,7 @@ services:
     # (containers/wait-ready.mjs), and no target in a comparison may run one either.
 
   bench:
-    image: node:24-slim
+    image: *node-slim-image
     networks: [bench]
     working_dir: /work
     volumes:

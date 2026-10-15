@@ -58,7 +58,8 @@ export async function sampleIds(datasetDir, table, field, limit, totalRows) {
  * The deterministic PRNG the harness uses for its own streams (mulberry32): two runs with the
  * same seed issue the same sequence, so runs can be diffed.
  */
-function stream(seed) {
+/** A seeded mulberry32 stream of uniforms in [0, 1). */
+export function stream(seed) {
 	let state = seed >>> 0;
 	return () => {
 		state = (state + 0x6d2b79f5) >>> 0;

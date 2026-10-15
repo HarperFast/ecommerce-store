@@ -154,6 +154,21 @@ export const WARMUP: Readonly<Record<string, { requests: number; rate: number }>
 };
 
 /**
+ * What a published (`bench`) run must use beyond the warm-up; verify-run-record.mjs fails a
+ * `bench` record without it, and the harness and orchestrator default to it at that scale.
+ *
+ * - `minStepSeconds`: tier 2 samples cycles every 250 ms, so a step boundary can misattribute
+ *   up to one interval at each end: up to ~3% of a 15 s step, under 1% of a 60 s one.
+ * - `arrivals`: seeded Poisson arrivals. Evenly spaced arrivals never bunch, so they understate
+ *   queueing against real traffic at the same utilization. The seed is fixed per step, so every
+ *   target is offered the same arrival times.
+ */
+export const PUBLISHED_RUN: Readonly<{ minStepSeconds: number; arrivals: 'poisson' | 'uniform' }> = {
+	minStepSeconds: 60,
+	arrivals: 'poisson',
+};
+
+/**
  * Request-side tier and region weights.
  *
  * Tier mirrors the seeded customer population; drawing them uniformly made every tier

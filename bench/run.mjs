@@ -31,9 +31,9 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { join } from 'node:path';
 import { cpus, totalmem, platform, release } from 'node:os';
-import { makeRequestFactory, makeWriterFactory, planWrites, sampleIds, writeKeys } from './workload.mjs';
+import { makeRequestFactory, makeWriterFactory, planWrites, sampleIds, stream, writeKeys } from './workload.mjs';
 import { accountStep, readAll, resolveCgroups } from './cgroups.mjs';
-import { ACCESS_SKEW, SCRAMBLE_SEED, WARMUP } from '@ecommerce-store/spec';
+import { ACCESS_SKEW, PUBLISHED_RUN, SCRAMBLE_SEED, WARMUP } from '@ecommerce-store/spec';
 
 const execFileAsync = promisify(execFile);
 
@@ -78,6 +78,8 @@ const DURATION = Number(argOf('duration', '15'));
 const WARMUP_REQUESTS = argOf('warmup-requests', null);
 const WARMUP_RATE = argOf('warmup-rate', null);
 const QUOTE_SHARE = Number(argOf('quote-share', '0.5'));
+/** `uniform` or `poisson`; unset, `bench` takes PUBLISHED_RUN.arrivals and `dev` stays uniform. */
+const ARRIVALS_ARG = argOf('arrivals', null);
 const WRITE_RATE = Number(argOf('write-rate', '20'));
 const OUT = argOf('out', join(import.meta.dirname, 'results'));
 /**
@@ -184,6 +186,33 @@ function cacheStatus(serverTiming) {
 }
 
 /**
+ * Arrival times for one step, in ms from its start, one per call.
+ *
+ * `uniform`: arrival k at k × interval. `poisson`: exponential gaps with the same mean, drawn
+ * from a stream seeded by the step's label, so every target is offered the same times. Its own
+ * stream: the key draws are unchanged whichever process is chosen.
+ */
+function arrivalSchedule(kind, interval, label) {
+	if (kind === 'uniform') {
+		let k = 0;
+		return () => k++ * interval;
+	}
+	let seed = 0x811c9dc5 ^ ARRIVAL_SEED;
+	for (const char of label) seed = Math.imul(seed ^ char.charCodeAt(0), 0x01000193);
+	const next = stream(seed);
+	let at = 0;
+	let first = true;
+	return () => {
+		if (first) {
+			first = false;
+			return 0;
+		}
+		at += -Math.log(1 - next()) * interval;
+		return at;
+	};
+}
+
+/**
  * Drive one step of the ladder at a constant arrival rate.
  *
  * Arrivals are scheduled against a fixed timeline rather than `setInterval`, so a slow
@@ -259,6 +288,8 @@ async function step({ rate, seconds, nextRequest, nextWrite, writeRate, label })
 	 */
 	const TICK_MS = 2;
 	const requestInterval = 1000 / rate;
+	const nextArrivalAt = arrivalSchedule(ARRIVALS, requestInterval, label);
+	let arrivalAt = nextArrivalAt();
 	const writeInterval = writeRate > 0 ? 1000 / writeRate : Infinity;
 
 	const postWrite = async (write) => {
@@ -290,24 +321,26 @@ async function step({ rate, seconds, nextRequest, nextWrite, writeRate, label })
 	};
 
 	const deadline = startedAt + seconds * 1000;
-	while (performance.now() < deadline) {
+	// Exactly `totalRequests` arrivals, every one at its scheduled time. Evenly spaced, the last
+	// falls inside the window; Poisson arrivals may run a little past it, and the offer window
+	// then ends at the last arrival rather than cutting the schedule short.
+	while (issued < totalRequests || performance.now() < deadline) {
 		const elapsed = performance.now() - startedAt;
-		// Arrival k is scheduled at k * interval, so k + 1 arrivals are due once that time has
-		// passed. Counting floor(elapsed / interval) dispatched every arrival one full interval
-		// after the time it is measured from — 40 ms of phantom latency on every request at
-		// 25 rps, 5 ms at 200, shrinking as the rate rises, which read as a target that got
-		// faster under load.
-		const dueRequests = Math.min(totalRequests, Math.floor(elapsed / requestInterval) + 1);
-		while (issued < dueRequests) {
+		// An arrival is due once its scheduled time has passed. Counting floor(elapsed / interval)
+		// dispatched every arrival one full interval after the time it is measured from — 40 ms
+		// of phantom latency on every request at 25 rps, 5 ms at 200, shrinking as the rate
+		// rises, which read as a target that got faster under load.
+		while (issued < totalRequests && arrivalAt <= elapsed) {
 			const request = nextRequest();
 			if (reads.size >= MAX_IN_FLIGHT) {
 				// A shed arrival still consumes its draw, so the key sequence stays identical for
 				// every target however much each one sheds.
 				shed++;
 			} else {
-				track(issue({ ...request, scheduledAt: startedAt + issued * requestInterval }), true);
+				track(issue({ ...request, scheduledAt: startedAt + arrivalAt }), true);
 			}
 			issued++;
+			arrivalAt = nextArrivalAt();
 		}
 		if (writeRate > 0) {
 			const dueWrites = Math.min(totalWrites, Math.floor(elapsed / writeInterval) + 1);
@@ -438,6 +471,9 @@ const [cartIds, productIds] = await Promise.all([
 
 const REQUEST_SEED = 1;
 const WRITE_SEED = 7;
+const ARRIVAL_SEED = 11;
+const ARRIVALS = ARRIVALS_ARG ?? (manifest.scale === 'bench' ? PUBLISHED_RUN.arrivals : 'uniform');
+if (ARRIVALS !== 'uniform' && ARRIVALS !== 'poisson') throw new Error(`--arrivals must be uniform or poisson, not ${ARRIVALS}`);
 const warmupDefault = WARMUP[manifest.scale] ?? WARMUP.dev;
 const warmup = {
 	requests: WARMUP_REQUESTS === null ? warmupDefault.requests : Number(WARMUP_REQUESTS),
@@ -526,8 +562,11 @@ async function writeRecord(warm, steps, complete) {
 						rates: RATES, quoteShare: QUOTE_SHARE, writeRate: WRITE_RATE, durationSeconds: DURATION,
 						warmup, maxInFlight: MAX_IN_FLIGHT,
 						drainMs: DRAIN_MS, quiesceMs: QUIESCE_MS, writeTimeoutMs: WRITE_TIMEOUT_MS,
-						arrivals: 'deterministic, evenly spaced, dispatched on a 2 ms tick',
-						seeds: { requests: REQUEST_SEED, writes: WRITE_SEED },
+						arrivals: ARRIVALS === 'poisson'
+							? 'seeded Poisson: exponential gaps, the same times for every target; dispatched on a 2 ms tick'
+							: 'deterministic, evenly spaced, dispatched on a 2 ms tick',
+						arrivalProcess: ARRIVALS,
+						seeds: { requests: REQUEST_SEED, writes: WRITE_SEED, arrivals: ARRIVALS === 'poisson' ? ARRIVAL_SEED : null },
 						requestHeaders: READ_HEADERS,
 						connections: `${CONNECTIONS} keep-alive connections, opened before the warm-up, used least-recently-used first`,
 						keySampling: 'every key of every table',

@@ -36,6 +36,8 @@ A run retains per-request samples and conditions in `bench/results/run-<timestam
 | Mechanism | Purpose and interpretation |
 |---|---|
 | Open load model | Issue arrivals on a fixed timeline regardless of outstanding requests, so the target cannot throttle offered load. |
+| Arrivals | `bench` uses seeded Poisson arrivals: exponential gaps with the offered rate's mean, from a stream seeded per step, so every target gets the same arrival times and evenly spaced arrivals do not understate queueing. `dev` keeps evenly spaced arrivals; `--arrivals poisson\|uniform` overrides. Each step offers exactly its requests; a Poisson step can run slightly past its nominal length. |
+| Published-run settings | `bench` steps last at least 60 s and the base images are pinned by digest (`PUBLISHED_RUN` in `@ecommerce-store/spec`, `x-base-images` in `compose.yaml`). Verification fails a `bench` record without them. |
 | Load ladder | Locate the rate at which latency or errors exceed the target. A single saturating rate cannot locate that boundary. |
 | Generator CPU | Record CPU per step. Above 0.8 of a core, flag the step and exclude it as a target measurement. |
 | Dispatch lag | Record scheduled-arrival-to-dispatch lag per step (p50, p99, max). Above 5 ms at p99, the generator fell behind its own schedule. |

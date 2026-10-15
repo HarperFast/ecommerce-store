@@ -16,7 +16,7 @@
 # Settings (environment; containers/.env supplies defaults and never overrides what is set):
 #
 #   SCALE            dev | bench; bench only with TIER=2             (dev)
-#   RATES DURATION   the ladder, offered rps and seconds per step    (25..200, 15)
+#   RATES DURATION   the ladder, offered rps and seconds per step    (25..200; 15, or 60 for bench)
 #   TRIALS           measured trials; 0 seeds and snapshots only     (1)
 #   SKIP_LOAD=1      restore the existing snapshot instead of seeding
 #   COMPOSE_EXTRA    extra compose files layered over compose.yaml, space-separated, relative
@@ -79,7 +79,9 @@ fi
 # memory and capacity is an order of magnitude below dev. A 400-2400 ladder spent four of
 # its five steps past collapse, which locates nothing.
 RATES="${RATES:-25,50,75,100,125,150,200}"
-DURATION="${DURATION:-15}"
+# 60 s steps on bench, PUBLISHED_RUN.minStepSeconds: tier-2 cycle samples are 250 ms apart, so
+# a 15 s step could misattribute up to ~3% of its cycles at its boundaries.
+DURATION="${DURATION:-$([ "$SCALE" = bench ] && echo 60 || echo 15)}"
 TRIALS="${TRIALS:-1}"
 # package.json is the one source of truth for the platform version, as in CI. The Dockerfile
 # and compose defaults are fallbacks for manual builds and must not drift from it.
@@ -253,8 +255,13 @@ else
   provenance | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.stringify({...JSON.parse(s), createdAt: new Date().toISOString()}, null, 2)))' > "$SNAPSHOT.json"
 fi
 
-image_digest() { $CONTAINER_CLI image inspect --format '{{index .RepoDigests 0}}' "$1" 2>/dev/null || echo unknown; }
-BASE_DIGESTS="node:24=$(image_digest node:24),node:24-slim=$(image_digest node:24-slim)"
+# The base images as compose pins them (x-base-images), digests included.
+read -r NODE_IMAGE NODE_SLIM_IMAGE BENCH_IMAGE < <($COMPOSE --profile manual config --format json | node -e '
+  let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
+    const { harper, bench } = JSON.parse(s).services;
+    console.log(harper.build.args.NODE_IMAGE, harper.build.args.NODE_SLIM_IMAGE, bench.image);
+  });')
+BASE_DIGESTS="node:24=$NODE_IMAGE,node:24-slim=$NODE_SLIM_IMAGE"
 
 failed_trials=0
 trial=1
@@ -310,7 +317,7 @@ while [ "$trial" -le "$TRIALS" ]; do
   ' "$TIER" "$CONTAINER_CLI" "$($CONTAINER_CLI --version)" "$COMPOSE_FILES" "$HARPER_VERSION" "$IMAGE_ID" "$IMAGE_ARCH" \
     "$TARGET_CPUS" "$TARGET_MEMORY" "$HARPER_THREADS" "${BENCH_CPUS:-2}" "${BENCH_MEMORY:-1g}" "$SNAPSHOT" \
     "${PRE_START_HOOK:-}" "${CONDITIONS_DIR:-}" "$others" "$cold_ms" "$((up_returned - cold_start))" "$limits" \
-    "$BASE_DIGESTS" "$(image_digest node:24-slim)" "${TARGET_REF:-}" "$CODE_COMMIT" "$TARGET_IMAGE_TAG")"
+    "$BASE_DIGESTS" "$BENCH_IMAGE" "${TARGET_REF:-}" "$CODE_COMMIT" "$TARGET_IMAGE_TAG")"
   [ -n "$others" ] && say "other containers running on this machine (recorded): $others"
 
   # --- 3 + 4. warm-up and measure, from a container OUTSIDE the target's budget -----------

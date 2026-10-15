@@ -5,8 +5,11 @@
 # same volume semantics — or the difference between wrappers can exceed the architectural
 # difference being measured.
 #
-# Pinned by digest-free tag deliberately: the tag is recorded with every run, and a run that
-# matters pins the digest in compose.yaml.
+# Base images are pinned by digest in compose.yaml (x-base-images) and passed in as NODE_IMAGE
+# and NODE_SLIM_IMAGE. They have no default here, so a build that bypasses compose has to name
+# them rather than silently take whatever the tag points at today.
+ARG NODE_IMAGE
+ARG NODE_SLIM_IMAGE
 
 # Pinned explicitly, and NOT inherited from the application's package.json.
 #
@@ -35,7 +38,7 @@ ARG HARPER_VERSION=5.3.2
 # Scripts are ignored on the install and the one native build is run explicitly: since 5.3.2
 # (no shrinkwrap) npm runs msgpackr-extract's install script, which falls through to node-gyp
 # and fails the whole install on an image without Python.
-FROM node:24 AS platform
+FROM ${NODE_IMAGE} AS platform
 ARG HARPER_VERSION
 ENV HARPER_VERSION=${HARPER_VERSION}
 RUN npm install -g --no-audit --no-fund --ignore-scripts "harper@${HARPER_VERSION}"
@@ -44,7 +47,7 @@ RUN node -e "require('.')" 2>/dev/null \
 	|| node /usr/local/lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js rebuild
 
 # --- the target ---------------------------------------------------------------------------
-FROM node:24-slim
+FROM ${NODE_SLIM_IMAGE}
 ARG HARPER_VERSION
 ENV HARPER_VERSION=${HARPER_VERSION}
 

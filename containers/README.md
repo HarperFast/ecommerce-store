@@ -68,6 +68,7 @@ These choices affect measurements and must match across targets:
 - **Plain HTTP on both ports.** TLS termination is excluded.
 - **No response compression.** Harper compresses only for clients that accept brotli, with `http.compressionThreshold` set, and neither holds here. A competing stack must not compress either.
 - **Named volume on a real filesystem.** Never tmpfs.
+- **Base images pinned by digest** (`x-base-images` in [compose.yaml](compose.yaml)): multi-arch index digests of `node:24` and `node:24-slim`, the same release on both tiers. The Dockerfile takes them as build arguments and has no default.
 - **Pinned Harper version**, installed globally and checked at build time, with msgpackr's native decoder verified loaded. Its linux-arm64 prebuilt ships only musl binaries, so the image compiles it; without it, an arm64 target runs a slower Harper than an x86-64 one.
 - **No healthcheck in any target container.** A healthcheck runs its probe inside the target's budget for the whole run. Readiness is probed from the host.
 - **Production dependency install:** `npm install --force --omit=dev --ignore-scripts`, matching Harper's deployment path.

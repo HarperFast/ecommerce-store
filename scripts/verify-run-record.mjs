@@ -18,7 +18,7 @@
  * COVERS: DATA-004 WRITE-001 WRITE-003 WRITE-004
  */
 import { readFile } from 'node:fs/promises';
-import { WARMUP } from '@ecommerce-store/spec';
+import { PUBLISHED_RUN, WARMUP } from '@ecommerce-store/spec';
 
 const args = process.argv.slice(2);
 const DEV = args.includes('--dev');
@@ -127,6 +127,20 @@ if (!warmup || warmup.requests !== expectedWarmup.requests || warmup.rate !== ex
 	fail('METHOD', `warm-up was ${warmup ? `${warmup.requests} requests at ${warmup.rate} rps` : 'unrecorded'}; the ${conditions.dataset?.scale} warm-up is ${expectedWarmup.requests} at ${expectedWarmup.rate}`);
 } else if (!warmed || Math.abs(warmed.issued + warmed.shed - warmup.requests) > Math.max(1, warmup.requests * 0.001)) {
 	fail('METHOD', `the warm-up offered ${warmed ? warmed.issued + warmed.shed : 'no'} of its ${warmup.requests} requests`);
+}
+// What a published (`bench`) run must use: steps long enough for the cycle join, arrivals that
+// bunch as real traffic does, and base images that cannot move between trials or sessions.
+if (conditions.dataset?.scale === 'bench') {
+	const harness = conditions.harness ?? {};
+	if (!(harness.durationSeconds >= PUBLISHED_RUN.minStepSeconds)) {
+		fail('METHOD', `steps of ${harness.durationSeconds} s; a bench run's steps are at least ${PUBLISHED_RUN.minStepSeconds} s`);
+	}
+	if (harness.arrivalProcess !== PUBLISHED_RUN.arrivals) {
+		fail('METHOD', `arrivals were ${harness.arrivalProcess ?? 'evenly spaced'}; a bench run uses ${PUBLISHED_RUN.arrivals} arrivals`);
+	}
+	const images = { ...(conditions.orchestrator?.target?.baseImages ?? {}), generator: conditions.orchestrator?.generator?.image };
+	const unpinned = Object.entries(images).filter(([, ref]) => !/@sha256:[0-9a-f]{64}$/.test(ref ?? ''));
+	if (unpinned.length) fail('METHOD', `base images not pinned by digest: ${unpinned.map(([name, ref]) => `${name}=${ref ?? 'unrecorded'}`).join(', ')}`);
 }
 // Tier 2: placement in the host's slices (application-architecture-benchmarks,
 // environments/gcp). A container left unplaced lands in system.slice on the housekeeping CPUs,
