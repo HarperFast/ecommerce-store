@@ -29,6 +29,7 @@
 #   TARGET_CGROUPS   override the target's cgroups for CPU accounting, `name=id-or-/path,...`
 #   CONDITIONS_DIR   an external run-conditions record (tier 2: conditions.sh), referenced
 #   KEEP_TARGET=1    leave the target running at the end
+#   BENCH_ARGS       extra arguments for bench/run.mjs, e.g. `--quote-share 1` (recorded with the run)
 #   ALLOW_UNVERIFIED_SNAPSHOT=1   restore a snapshot whose provenance is missing or differs
 set -euo pipefail
 
@@ -296,7 +297,7 @@ while [ "$trial" -le "$TRIALS" ]; do
     --url http://harper:9926 \
     --dataset "$DATASET_IN_BENCH" \
     --rates "$RATES" --duration "$DURATION" --out /results \
-    --cold-ms "$cold_ms" | tee "$log"; then
+    --cold-ms "$cold_ms" ${BENCH_ARGS:-} | tee "$log"; then
     echo "trial $trial: the generator failed; the steps it finished are in its record" >&2
     failed_trials=$((failed_trials + 1))
   fi
