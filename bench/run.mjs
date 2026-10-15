@@ -46,7 +46,12 @@ const execFileAsync = promisify(execFile);
  */
 async function codeVersion() {
 	// The generator image has no git; the orchestrator reads it on the host and passes it in.
-	if (process.env.CODE_COMMIT) return { commit: process.env.CODE_COMMIT, dirty: process.env.CODE_DIRTY === '1' };
+	// `commit` is the target's application code; `harness` is the checkout that drove it, which
+	// differs when the orchestrator built the target from another commit (TARGET_REF).
+	if (process.env.CODE_COMMIT) {
+		const harness = process.env.HARNESS_COMMIT ? { commit: process.env.HARNESS_COMMIT, dirty: process.env.HARNESS_DIRTY === '1' } : null;
+		return { commit: process.env.CODE_COMMIT, dirty: process.env.CODE_DIRTY === '1', harness };
+	}
 	try {
 		const { stdout: sha } = await execFileAsync('git', ['rev-parse', 'HEAD']);
 		const { stdout: dirty } = await execFileAsync('git', ['status', '--porcelain']);

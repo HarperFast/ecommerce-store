@@ -30,6 +30,9 @@
 #   CONDITIONS_DIR   an external run-conditions record (tier 2: conditions.sh), referenced
 #   KEEP_TARGET=1    leave the target running at the end
 #   BENCH_ARGS       extra arguments for bench/run.mjs, e.g. `--quote-share 1` (recorded with the run)
+#   TARGET_REF       build the target's application code from this commit instead of the
+#                    checkout, e.g. `dd3a5f5^`; the Dockerfile, harness and snapshot are the
+#                    checkout's, and the record names the commit each trial's target came from
 #   ALLOW_UNVERIFIED_SNAPSHOT=1   restore a snapshot whose provenance is missing or differs
 set -euo pipefail
 
@@ -145,7 +148,7 @@ provenance() {
   node -e '
     const [scale, manifestSha, schemaSha, harperVersion, arch, imageId, commit, dirty] = process.argv.slice(1);
     console.log(JSON.stringify({ scale, datasetManifestSha256: manifestSha, schemaSha256: schemaSha, harperVersion, arch, imageId, code: { commit, dirty: dirty === "1" } }));
-  ' "$SCALE" "$(sha256_of "$DATASET_HOST/MANIFEST.json")" "$(schema_sha256 "$REPO"/schemas/*.graphql)" \
+  ' "$SCALE" "$(sha256_of "$DATASET_HOST/MANIFEST.json")" "$(schema_sha256 "$TARGET_CONTEXT"/schemas/*.graphql)" \
     "$HARPER_VERSION" "$IMAGE_ARCH" "$IMAGE_ID" "$CODE_COMMIT" "$CODE_DIRTY"
 }
 check_provenance() {
@@ -176,10 +179,32 @@ restore_snapshot() {
 finish() { [ "${KEEP_TARGET:-0}" = 1 ] || stop_target; }
 trap finish EXIT
 
-CODE_COMMIT="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo)"
-CODE_DIRTY="$([ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ] && echo 1 || echo 0)"
+# The harness, orchestrator and Dockerfile always come from the checkout. The target's
+# application code does too, unless TARGET_REF names a commit: then it is built from that
+# commit's tree (git archive into .work/targets/), tagged by commit, so an A/B of two builds runs
+# in one session against one snapshot. The schema must match the snapshot's; provenance checks it.
+HARNESS_COMMIT="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo)"
+HARNESS_DIRTY="$([ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ] && echo 1 || echo 0)"
+export TARGET_DOCKERFILE="$PWD/Dockerfile"
+if [ -n "${TARGET_REF:-}" ]; then
+  CODE_COMMIT="$(git -C "$REPO" rev-parse --verify --quiet "${TARGET_REF}^{commit}")" || { echo "TARGET_REF $TARGET_REF is not a commit" >&2; exit 1; }
+  CODE_DIRTY=0
+  export TARGET_CONTEXT="$REPO/.work/targets/$CODE_COMMIT"
+  if [ ! -d "$TARGET_CONTEXT" ]; then
+    rm -rf "$TARGET_CONTEXT.partial" && mkdir -p "$TARGET_CONTEXT.partial"
+    # The dataset is loaded from the checkout, never built in; leaving it out keeps this small.
+    git -C "$REPO" archive "$CODE_COMMIT" -- . ':(exclude)dataset' | tar -x -C "$TARGET_CONTEXT.partial"
+    mv "$TARGET_CONTEXT.partial" "$TARGET_CONTEXT"
+  fi
+  export TARGET_IMAGE_TAG="${CODE_COMMIT:0:12}"
+else
+  CODE_COMMIT="$HARNESS_COMMIT"
+  CODE_DIRTY="$HARNESS_DIRTY"
+  export TARGET_CONTEXT="$REPO"
+  export TARGET_IMAGE_TAG=checkout
+fi
 
-say "building target (harper=$HARPER_VERSION cpus=$TARGET_CPUS memory=$TARGET_MEMORY threads=$HARPER_THREADS tier=$TIER)"
+say "building target (harper=$HARPER_VERSION cpus=$TARGET_CPUS memory=$TARGET_MEMORY threads=$HARPER_THREADS tier=$TIER code=${CODE_COMMIT:0:12}${TARGET_REF:+ from TARGET_REF=$TARGET_REF})"
 $COMPOSE build harper
 IMAGE_ID="$($CONTAINER_CLI image inspect --format '{{.Id}}' "$($COMPOSE config --images harper 2>/dev/null | head -1)" 2>/dev/null || echo unknown)"
 IMAGE_ARCH="$($CONTAINER_CLI image inspect --format '{{.Architecture}}' "$IMAGE_ID" 2>/dev/null || echo unknown)"
@@ -259,7 +284,7 @@ while [ "$trial" -le "$TRIALS" ]; do
   limits="$($CONTAINER_CLI inspect --format '{{.HostConfig.NanoCpus}} {{.HostConfig.CpuQuota}} {{.HostConfig.CpuPeriod}} {{.HostConfig.Memory}} {{.HostConfig.CgroupParent}}' "$target" 2>/dev/null || echo)"
   others="$($CONTAINER_CLI ps --format '{{.Names}}' | grep -v '^harper-ecommerce-bench' | paste -sd, - || true)"
   conditions="$(node -e '
-    const [tier, cli, cliVersion, composeFiles, harperVersion, imageId, arch, cpus, memory, threads, benchCpus, benchMemory, snapshot, hook, conditionsDir, others, coldMs, upMs, limits, baseDigests, benchImage] = process.argv.slice(1);
+    const [tier, cli, cliVersion, composeFiles, harperVersion, imageId, arch, cpus, memory, threads, benchCpus, benchMemory, snapshot, hook, conditionsDir, others, coldMs, upMs, limits, baseDigests, benchImage, targetRef, targetCommit, imageTag] = process.argv.slice(1);
     let snapshotProvenance = null;
     try { snapshotProvenance = JSON.parse(require("node:fs").readFileSync(snapshot + ".json", "utf8")); } catch {}
     const [nanoCpus, cpuQuota, cpuPeriod, memoryBytes, cgroupParent] = limits.split(" ");
@@ -267,7 +292,10 @@ while [ "$trial" -le "$TRIALS" ]; do
       tier: Number(tier), containerCli: cli, containerCliVersion: cliVersion, composeFiles: composeFiles.trim().split(/\s+/),
       network: "compose bridge", tls: false,
       target: {
-        harperVersion, image: { id: imageId, arch }, baseImages: Object.fromEntries(baseDigests.split(",").map((pair) => pair.split("="))),
+        harperVersion, image: { id: imageId, arch, tag: imageTag },
+        // Which build this trial ran: the checkout, or the commit TARGET_REF named.
+        build: { ref: targetRef || null, commit: targetCommit || null, source: targetRef ? "git archive of the commit" : "checkout" },
+        baseImages: Object.fromEntries(baseDigests.split(",").map((pair) => pair.split("="))),
         budget: { cpus: Number(cpus), memory, threads: Number(threads) },
         // What the runtime actually applied, not what was asked for.
         applied: { nanoCpus: Number(nanoCpus) || null, cpuQuota: Number(cpuQuota) || null, cpuPeriod: Number(cpuPeriod) || null, memoryBytes: Number(memoryBytes) || null, cgroupParent: cgroupParent || null },
@@ -282,7 +310,7 @@ while [ "$trial" -le "$TRIALS" ]; do
   ' "$TIER" "$CONTAINER_CLI" "$($CONTAINER_CLI --version)" "$COMPOSE_FILES" "$HARPER_VERSION" "$IMAGE_ID" "$IMAGE_ARCH" \
     "$TARGET_CPUS" "$TARGET_MEMORY" "$HARPER_THREADS" "${BENCH_CPUS:-2}" "${BENCH_MEMORY:-1g}" "$SNAPSHOT" \
     "${PRE_START_HOOK:-}" "${CONDITIONS_DIR:-}" "$others" "$cold_ms" "$((up_returned - cold_start))" "$limits" \
-    "$BASE_DIGESTS" "$(image_digest node:24-slim)")"
+    "$BASE_DIGESTS" "$(image_digest node:24-slim)" "${TARGET_REF:-}" "$CODE_COMMIT" "$TARGET_IMAGE_TAG")"
   [ -n "$others" ] && say "other containers running on this machine (recorded): $others"
 
   # --- 3 + 4. warm-up and measure, from a container OUTSIDE the target's budget -----------
@@ -292,7 +320,7 @@ while [ "$trial" -le "$TRIALS" ]; do
   log="$(mktemp)"
   if ! $COMPOSE run --rm --no-deps \
     -e RUN_CONDITIONS="$conditions" -e TARGET_CGROUPS="$cgroups" \
-    -e CODE_COMMIT="$CODE_COMMIT" -e CODE_DIRTY="$CODE_DIRTY" \
+    -e CODE_COMMIT="$CODE_COMMIT" -e CODE_DIRTY="$CODE_DIRTY" -e HARNESS_COMMIT="$HARNESS_COMMIT" -e HARNESS_DIRTY="$HARNESS_DIRTY" \
     bench node bench/run.mjs \
     --url http://harper:9926 \
     --dataset "$DATASET_IN_BENCH" \

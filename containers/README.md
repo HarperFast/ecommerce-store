@@ -31,6 +31,7 @@ The header of [run-benchmark.sh](run-benchmark.sh) lists every setting. The ones
 | `PRE_START_HOOK` | Host command run between stopping the target and its measured start, to drop the page cache the restore filled outside the target's budget. On a Podman machine it defaults to dropping the VM's cache, which also cools every other container on the machine; tier 2 sets it to drop the host's, as root. A `bench` record without one fails verification. |
 | `DATASET_ROOT`, `SNAPSHOT_DIR` | Where expanded datasets and snapshots live, so a worktree can use another checkout's. |
 | `KEEP_TARGET=1` | Leave the target running afterwards; by default it is stopped. |
+| `TARGET_REF` | Build the target's application code from this commit, for example `dd3a5f5^`, the build before quote batching. Each build is its own image, tagged by commit; the Dockerfile, harness, and snapshot stay the checkout's. The record names the build in `conditions.code.commit` and `orchestrator.target.build`. |
 
 ## Resource budget
 
@@ -48,6 +49,16 @@ On the tier-2 host ([application-architecture-benchmarks](https://github.com/Har
 - **Memory limit kept.** A container cannot see its slice's limits. Harper sizes its block cache and worker heaps from its own container's limit, so the target keeps an explicit 2 GiB one; without it Harper would size from the VM's memory.
 - **CPU quota dropped.** The slice's cpuset already gives two cores, and Harper's thread count is explicit. A quota on top would add throttling the tier-2 procedure discourages.
 - **Checked.** `verify-run-record.mjs` fails a tier-2 record whose target ran outside the slice or without a memory limit.
+
+Two builds of the target run in one session against one snapshot, alternating, with `TARGET_REF` selecting the second. Seed once with the checkout; every trial after that uses `SKIP_LOAD=1`:
+
+```bash
+SCALE=bench TIER=2 TRIALS=0 COMPOSE_EXTRA=compose.tier2.yaml ./containers/run-benchmark.sh      # build, seed, snapshot
+SCALE=bench TIER=2 SKIP_LOAD=1 TRIALS=1 COMPOSE_EXTRA=compose.tier2.yaml ./containers/run-benchmark.sh                          # batched
+SCALE=bench TIER=2 SKIP_LOAD=1 TRIALS=1 COMPOSE_EXTRA=compose.tier2.yaml TARGET_REF='dd3a5f5^' ./containers/run-benchmark.sh  # before batching
+```
+
+The snapshot's provenance checks the build's schema, so `TARGET_REF` cannot restore a snapshot whose storage it does not match.
 
 ## Fixed run conditions
 

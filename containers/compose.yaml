@@ -19,9 +19,13 @@ name: harper-ecommerce-bench
 
 services:
   harper:
+    # Tagged per build, so two builds of the target can coexist in one session: the orchestrator
+    # sets TARGET_CONTEXT and TARGET_IMAGE_TAG when TARGET_REF names a commit (run-benchmark.sh).
+    image: harper-ecommerce-bench-harper:${TARGET_IMAGE_TAG:-checkout}
     build:
-      context: ..
-      dockerfile: containers/Dockerfile
+      context: ${TARGET_CONTEXT:-..}
+      # The checkout's Dockerfile for every build, so builds differ only in application code.
+      dockerfile: ${TARGET_DOCKERFILE:-containers/Dockerfile}
       args:
         HARPER_VERSION: ${HARPER_VERSION:-5.3.2}
     networks: [bench]
