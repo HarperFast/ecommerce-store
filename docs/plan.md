@@ -30,6 +30,8 @@ Results are never published from this repo.
 
 ## Recent work
 
+- **2026-10-15 — Quote reads overlapped** (Ethan: in this branch and PR). `quote.js` sends each read as soon as its key is known: the customer and every distinct SKU's variant from the cart, inventory once the customer names the region, each distinct product once the variants name it, promotions once the tier and categories are known. Prices are unchanged: identical responses for all 2,000 `dev` carts from fresh loads in containers, and for all 300,000 `bench` carts offline. On `dev` it costs more target CPU per quote, not less; see [quote batching on `dev`](#quote-batching-on-dev-2026-10-15). `BENCH_ARGS` passes harness flags such as `--quote-share 1` through the orchestrator.
+
 - **2026-10-15 — Two decisions (Ethan):** the `bench` warm-up is fixed at 120,000 requests at 100 rps, about 20 minutes, from the 10-minute soak below; `dev` keeps 2,000 at 200 rps. Both live in `WARMUP` in `@ecommerce-store/spec`, are recorded with each run, and are checked by `verify-run-record.mjs`. And `bench` runs only on the tier-2 host or a platform as a service, never locally.
 
 - **2026-10-14 — Realistic access, regenerated dataset** (same branch; Ethan approved the regeneration for this change and kept it in one PR):
@@ -67,6 +69,25 @@ Validation: full `npm run check` passes in this checkout, including deployment s
 | Outstanding specification reviews | Maintainers; status in [Review gate](../SPEC.md#review-gate) |
 | Sanity-check the invented promotion evaluation order | Reviewer with pricing-engine experience |
 | Answer the [OAuth scope question](questions/oauth-authorization-server-scope.md), drafted but unsent | `@harperfast/oauth` maintainers; not blocking P0 |
+
+## Quote batching on `dev` (2026-10-15)
+
+Alternating trials in one session: `e6d8c19` (before) and the batched quote (after), three rounds of a mixed ladder (800–3,200 rps, half quotes) and a quote-only ladder (400–2,000 rps, `--quote-share 1`), 20 s steps, every trial seeded fresh and cold-started. No other containers ran. Medians of the quote-only steps, before → after:
+
+| Offered quotes/s | Target CPU per quote | Quote p50 | Quote p99 |
+|---|---|---|---|
+| 400 | 1.49 → 1.59 ms | 2.6 → 2.9 ms | 14 → 99 ms |
+| 800 | 1.00 → 1.20 ms | 2.7 → 3.1 ms | 42 → 116 ms |
+| 1,200 | 0.87 → 1.11 ms | 3.1 → 4.0 ms | 49 → 366 ms |
+| 1,600 | 0.81 → 0.88 ms | 3.6 → 4.1 ms | 39 → 197 ms |
+| 2,000 | 0.84 → 0.89 ms | 6.9 → 9.1 ms | 156 → 375 ms |
+
+- **Quote-only:** batching cost more CPU per quote in 10 of 11 paired steps (geometric mean +13%) and raised p99 in 10 of 11. Both sustained 2,000 quotes/s, the highest step.
+- **Mixed:** no consistent difference. CPU per request was higher after in 5 of 11 paired steps; both fell short of 3,200 rps (2,911–3,193 achieved).
+- **Writes:** 400 per step in both arms, no failures, identical invalidation counts. The harness does not time writes, so batching's effect on the write path's own tail is unmeasured.
+- **Excluded:** five first-round steps, four before and one after, stalled for up to 15 s. Zoom was running on the host then, and a Chrome tab burst to 2.5 cores during the stall after. The later rounds had neither Zoom nor stalls. Bluetooth's daemon held about one host core throughout.
+
+A likely reason, unverified: in Harper 5.3.2 a read that misses the worker's record cache goes to RocksDB asynchronously through a thread pool. On `dev` those reads find their data in memory, so overlapping them hides no I/O, and a quote's reads now queue together inside the target's two CPUs. Whether batching pays where reads wait on disk is unmeasured; `bench` runs only on tier 2.
 
 ## Bench-scale observations on dataset 0.5.0 (2026-10-14)
 
@@ -140,7 +161,8 @@ Follow-up hypotheses:
 | **No ground-truth guard.** The harness counts every 2xx as success. Determinism does not prove correctness. | Add pinned, independently computed expected quotes; see Next. |
 | **Pricing phases are unevenly exercised.** Exclusive and threshold promotions each reach roughly half of `dev` carts; BOGO and stackable discounts barely register under the shared 60% cap. | Decide between changing the cap, narrowing cart-wide eligibility, or changing order. Each changes the workload and requires coordinated dataset regeneration. |
 | **Promotion-index benefit is unmeasured.** Sentinel probes pass completeness checks and narrow candidates, but are marginally slower than a scan on `dev`. | Measure at `bench` scale before claiming a benefit; quote fan-out may still dominate. |
-| **Unexplained `dev` latency.** One step had p90 in seconds; a higher step had single-digit milliseconds. Quotes were slow, not products. | Recheck on 5.3.2 with the dispatch fix; see the 2026-10-05 hypothesis about pre-5.3.1 write-lock release. |
+| **Unexplained `dev` latency.** One step had p90 in seconds; a higher step had single-digit milliseconds. Quotes were slow, not products. On 5.3.2, stalls of up to 15 s hit five of 54 `dev` steps, in both builds, only while Zoom and a Chrome tab loaded the host. | Treat as host contention unless tier 2 shows it; the 2026-10-05 write-lock hypothesis predates 5.3.1. |
+| **Quote batching is unproven.** On `dev` it costs 13% more target CPU per quote and raises quote p99; see [quote batching on `dev`](#quote-batching-on-dev-2026-10-15). | Run one tier-2 `bench` ladder pair, before and after, and decide from it. |
 | **The write surface and response details are specified by tests, not `SPEC.md`.** The harness and suite require `POST /admin/variant/:sku` `{basePrice}`, `POST /admin/inventory/:id` `{onHand}`, an `invalidated` count in each write response, the `Server-Timing` grammar (`cache;desc=hit\|miss`, `data`, `compute`, `total`), and quote fields (`currency`, `region`, `taxJurisdiction`, `totalWeight`) that only [model.ts](../packages/spec/src/model.ts) names. | Specify them, or name `packages/spec` as normative, before a second implementation is built against the prose. |
 | **Metric definitions differ across stacks.** `invalidated` counts keys targeted (Harper writes an invalidation marker even for a never-cached key); a Redis `DEL` count is keys removed. Harper reports a request that waited on another request's in-flight fill as a hit. `total` excludes response serialization in both handlers. | Define each in `SPEC.md` so cache-hit rates and invalidation fan-out compare. |
 | **`DATA-004` is undemonstrated.** With every key reachable and the cache dropped, a local 10-minute soak filled 87% of the target's memory and was still growing; nothing was evicted. `verify-run-record.mjs` checks memory against the budget and fails such a run. | Decided: a fixed `bench` warm-up of 120,000 requests at 100 rps (about 20 minutes), which verification checks. Show `DATA-004` on tier 2; `bench` no longer runs locally. Re-running the first rate at the end to measure drift is still open. |
