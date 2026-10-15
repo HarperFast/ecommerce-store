@@ -25,10 +25,17 @@ Results are never published from this repo.
 | Background writer | Harness-side only; no in-application writer. |
 | Datasets | Generator `0.5.0`: carts drawn from a scrambled discrete Zipf. `dev` in plain git, `bench` in Git LFS; checksum-verified before loading. |
 | Conformance | Every MUST has declared coverage; execution and assertion gaps remain below. |
-| Harness and containers | Load ladder, 2 CPU / 2 GiB target, snapshot restore with provenance, per-step target CPU from cgroups, run-record verification after every trial, tier-2 placement override. No complete `bench` ladder yet. |
+| Harness and containers | Load ladder, 2 CPU / 2 GiB target, snapshot restore with provenance, per-step target CPU from cgroups, run-record verification after every trial. For tier 2: slice placement, per-step cycles joined from the host's sampler, a second build of the target by commit (`TARGET_REF`), and published-run settings (60 s steps, seeded Poisson arrivals, base images pinned by digest). No complete `bench` ladder yet; nothing has run on tier 2. |
 | CI | Repo checks and conformance on pushes and pull requests; LFS pulled only for dataset changes. Both jobs last recorded passing. |
 
 ## Recent work
+
+- **2026-10-15 — Ready for the first tier-2 session** (Ethan: Harper against Fastify + Postgres + Redis on GCP; checked against application-architecture-benchmarks `origin/gcp-tier2` at `68b7a3c`):
+  - **Placement.** `compose.tier2.yaml` matches `host-setup.sh`: the target in `bench.slice/bench-target.slice` (CPUs 2–3, 2 GiB, no swap), the generator in `bench-generator.slice` (CPUs 4–7). A container cannot see its slice's limits, so Harper keeps its own 2 GiB limit to size its caches from; its CPU quota is dropped. Verification fails a tier-2 record whose target ran outside the slice or without a memory limit.
+  - **Cycle join.** [cycles.mjs](../bench/cycles.mjs) joins `sample.sh`'s per-cgroup perf counts to each step: target and generator gigacycles, effective GHz, IPC, ops per gigacycle. The orchestrator runs it when `SAMPLES_DIR` is set; verification fails a tier-2 step without cycles.
+  - **Two builds in one session.** `TARGET_REF=dd3a5f5^` builds the target before quote batching from that commit's tree with the checkout's Dockerfile, as its own image, against the same snapshot. Each record names its build.
+  - **Published-run settings.** `bench` steps last 60 s, arrivals are seeded Poisson, and both base images are pinned by multi-arch digest (`PUBLISHED_RUN`, `x-base-images`). Verification fails a `bench` record without them.
+  - **Untested until the Linux host:** see [Open](#open).
 
 - **2026-10-15 — Quote reads overlapped** (Ethan: in this branch and PR). `quote.js` sends each read as soon as its key is known: the customer and every distinct SKU's variant from the cart, inventory once the customer names the region, each distinct product once the variants name it, promotions once the tier and categories are known. Prices are unchanged: identical responses for all 2,000 `dev` carts from fresh loads in containers, and for all 300,000 `bench` carts offline. On `dev` it costs more target CPU per quote, not less; see [quote batching on `dev`](#quote-batching-on-dev-2026-10-15). `BENCH_ARGS` passes harness flags such as `--quote-share 1` through the orchestrator.
 
@@ -55,7 +62,7 @@ Validation: full `npm run check` passes in this checkout, including deployment s
 
 ## Next
 
-1. **Run `bench` on the tier-2 host.** `bench` no longer runs locally: local container runs use `dev`, and the orchestrator refuses `SCALE=bench` without `TIER=2`. `DATA-004` evidence comes from tier 2. The warm-up is decided: 120,000 requests at 100 rps, about 20 minutes, fixed for every target. The local 5.3.2 snapshots stay in the main checkout's `containers/.snapshots/`.
+1. **Run `bench` on the tier-2 host: Harper against Fastify + Postgres + Redis, and Harper's quote batching against the build before it.** The procedure is in [containers/README.md](../containers/README.md#tier-2). Budget the time: a trial is about 30 minutes (a 20-minute warm-up, seven 60 s steps, restore and cold start), so three builds at three trials each is about 4.5 hours plus 20 minutes of seeding per target, against the VM's 8-hour limit. `bench` never runs locally; `DATA-004` evidence comes from tier 2. The local 5.3.2 snapshots stay in the main checkout's `containers/.snapshots/`.
 2. **Re-run the Fastify + Postgres + Redis target (application-architecture-benchmarks #6) against dataset `0.5.0`.** It is pinned to `1f4a350`, which carries the `0.4.0` dataset and the old access distribution.
 3. **Add independent expected values.** Build a correctness suite keyed to the dataset manifest checksum. Conformance checks shape and consistency; the harness also needs expected quotes derived independently from the implementation under test. Publish expected values as data so every stack compares against the same answers without sharing pricing code.
 4. **Confirm `FRESH_MS`.** The provisional budget in [Background writes](../SPEC.md#background-writes) needs run evidence; `PDP-003` and `WRITE-002` depend on it.
@@ -65,7 +72,7 @@ Validation: full `npm run check` passes in this checkout, including deployment s
 
 | Need | Owner |
 |---|---|
-| Linux host for controlled measurements; macOS Podman's VM complicates resource limits, networking, and clock control | Maintainers |
+| Linux host for controlled measurements: the GCP tier-2 host, qualified on `c4-standard-16-lssd` (application-architecture-benchmarks #5); no target has run there | Maintainers |
 | Outstanding specification reviews | Maintainers; status in [Review gate](../SPEC.md#review-gate) |
 | Sanity-check the invented promotion evaluation order | Reviewer with pricing-engine experience |
 | Answer the [OAuth scope question](questions/oauth-authorization-server-scope.md), drafted but unsent | `@harperfast/oauth` maintainers; not blocking P0 |
@@ -162,18 +169,14 @@ Follow-up hypotheses:
 | **Pricing phases are unevenly exercised.** Exclusive and threshold promotions each reach roughly half of `dev` carts; BOGO and stackable discounts barely register under the shared 60% cap. | Decide between changing the cap, narrowing cart-wide eligibility, or changing order. Each changes the workload and requires coordinated dataset regeneration. |
 | **Promotion-index benefit is unmeasured.** Sentinel probes pass completeness checks and narrow candidates, but are marginally slower than a scan on `dev`. | Measure at `bench` scale before claiming a benefit; quote fan-out may still dominate. |
 | **Unexplained `dev` latency.** One step had p90 in seconds; a higher step had single-digit milliseconds. Quotes were slow, not products. On 5.3.2, stalls of up to 15 s hit five of 54 `dev` steps, in both builds, only while Zoom and a Chrome tab loaded the host. | Treat as host contention unless tier 2 shows it; the 2026-10-05 write-lock hypothesis predates 5.3.1. |
-| **Quote batching is unproven.** On `dev` it costs 13% more target CPU per quote and raises quote p99; see [quote batching on `dev`](#quote-batching-on-dev-2026-10-15). | Run one tier-2 `bench` ladder pair, before and after, and decide from it. |
+| **Quote batching is unproven.** On `dev` it costs 13% more target CPU per quote and raises quote p99; see [quote batching on `dev`](#quote-batching-on-dev-2026-10-15). Ethan keeps it in for now. | Alternate the checkout with `TARGET_REF=dd3a5f5^` in the tier-2 session, and decide from it. |
 | **The write surface and response details are specified by tests, not `SPEC.md`.** The harness and suite require `POST /admin/variant/:sku` `{basePrice}`, `POST /admin/inventory/:id` `{onHand}`, an `invalidated` count in each write response, the `Server-Timing` grammar (`cache;desc=hit\|miss`, `data`, `compute`, `total`), and quote fields (`currency`, `region`, `taxJurisdiction`, `totalWeight`) that only [model.ts](../packages/spec/src/model.ts) names. | Specify them, or name `packages/spec` as normative, before a second implementation is built against the prose. |
 | **Metric definitions differ across stacks.** `invalidated` counts keys targeted (Harper writes an invalidation marker even for a never-cached key); a Redis `DEL` count is keys removed. Harper reports a request that waited on another request's in-flight fill as a hit. `total` excludes response serialization in both handlers. | Define each in `SPEC.md` so cache-hit rates and invalidation fan-out compare. |
 | **`DATA-004` is undemonstrated.** With every key reachable and the cache dropped, a local 10-minute soak filled 87% of the target's memory and was still growing; nothing was evicted. `verify-run-record.mjs` checks memory against the budget and fails such a run. | Decided: a fixed `bench` warm-up of 120,000 requests at 100 rps (about 20 minutes), which verification checks. Show `DATA-004` on tier 2; `bench` no longer runs locally. Re-running the first rate at the end to measure drift is still open. |
 | **The Fastify target uses the old dataset.** application-architecture-benchmarks #6 is pinned to `1f4a350` (dataset `0.4.0`, the old distribution). | Follow up against dataset `0.5.0` before any comparison. |
-| **Arrivals are evenly spaced.** Deterministic spacing understates queueing against Poisson arrivals at the same utilization. | Decide whether to offer seeded Poisson arrivals. |
 | **Network softirq is not charged to a cgroup.** Bridge traffic between a separated stack's containers is partly unaccounted, and on tier 2 may run outside the target's CPUs; Harper has no such hops. | On tier 2, record per-step softirq for the target CPUs, or steer bridge interrupts onto them; disclose either way. |
 | **Duplicate SKU lines allocate inventory twice.** Promotions merge lines by SKU; availability does not, so a repeated SKU understates `shortfall`. The dataset has no such carts. | Clarify in `SPEC.md` whether lines merge for availability and in the response. |
-| **No cycle join.** Steps carry wall-clock boundaries; nothing yet turns tier-2 host samples into per-step gigacycles or effective frequency. | A small join script, with the shared harness. |
-| **Base images are tags.** `node:24`, `node:24-slim` float; the run records the target image id but not base digests. | Record digests every trial; pin them for a published run. |
-| **Steps are 15 s.** At tier-2's 250 ms sampling, boundary error is up to ~3% of a step. | Longer steps for published runs, or state the error. |
-| **Tier-2 limits inside the slice.** `compose.tier2.yaml` keeps the container's CPU quota and memory limit; the tier-2 procedure discourages per-container quotas. Harper sizes its block cache and heaps from its own cgroup's memory limit. | Decide; see the questions in the 2026-10-12 report. |
+| **Untested until the Linux host.** `sample.sh`'s per-cgroup CSV has never been captured, so the join reads it by perf's documented column order (tested against the probe's real per-CPU output). Also untested: `!reset` under Docker's Compose plugin, cgroup accounting of a `docker-<id>.scope` inside `bench-target.slice`, the join waiting on perf's flush, the page-cache hook under `sudo`, the x86-64 image build, and a real Fastify target beside Harper. | Check each in the first session's shakedown trial, before the measured trials. |
 | **Harper 5.3.2: a `static` verb override is permission-checked on its first table read.** REST leaves `authorize` set, so a static custom resource reading a table answers 401 to anonymous callers, though server-side reads are documented as trusted. The endpoints stay instance-style. | Report upstream; convert to static verbs once fixed. |
 | **Harper 5.3.2: queued cache fills run in the first fill's async context** (`server/throttle.ts`), so a resolver's ambient table reads join another fill's transaction. The resolver passes its context explicitly. | Report upstream. |
 | **Harper 5.3.2 packaging.** The global install needs Python on glibc images, and msgpackr-extract's linux-arm64 prebuilt lacks glibc binaries. The Dockerfile works around both. | Report upstream (Harper; msgpackr-extract). |
@@ -193,7 +196,7 @@ Follow-up hypotheses:
 ## What may not be claimed yet
 
 - **Correctness from a run:** the harness has no ground-truth guard.
-- **Cycle-normalized efficiency:** the CPU clock is not pinned.
+- **Cycle-normalized efficiency:** never from tier 1, where the clock is neither pinned nor measured; on tier 2 only from runs whose cycles were joined, stated as "all-core turbo, measured at N GHz".
 - **Cross-target comparisons:** only one implementation exists.
 - **Component CPU breakdowns:** Harper is one container; per-container accounting exists but no assembled stack has been measured.
 - **Benchmark results from `dev`:** it fits in memory.
