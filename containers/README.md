@@ -12,10 +12,10 @@ Locally, run `dev` only:
 SCALE=dev ./containers/run-benchmark.sh
 ```
 
-**`bench` never runs locally.** It runs only on the tier-2 Linux host or a platform as a service, where its evidence — including `DATA-004`, a working set larger than memory — can be trusted. The orchestrator refuses `SCALE=bench` unless `TIER=2`. On the tier-2 host, with the slice placement and the page-cache drop:
+**`bench` never runs locally.** It runs only on the tier-2 Linux host or a platform as a service, where its evidence — including `DATA-004`, a working set larger than memory — can be trusted. The orchestrator refuses `SCALE=bench` unless `TIER=2`. On the tier-2 host, with the slice placement, the page-cache drop, and the cycle join ([Tier 2](#tier-2) has a session with two builds):
 
 ```bash
-SCALE=bench TIER=2 TRIALS=3 COMPOSE_EXTRA=compose.tier2.yaml PRE_START_HOOK='sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null' ./containers/run-benchmark.sh
+SCALE=bench TIER=2 TRIALS=3 COMPOSE_EXTRA=compose.tier2.yaml SAMPLES_DIR=$S/samples PRE_START_HOOK='sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null' ./containers/run-benchmark.sh
 ```
 
 `dev` is for iteration only. Benchmark data requires Git LFS; see [setup](../CONTRIBUTING.md#setup).
@@ -50,12 +50,16 @@ On the tier-2 host ([application-architecture-benchmarks](https://github.com/Har
 - **CPU quota dropped.** The slice's cpuset already gives two cores, and Harper's thread count is explicit. A quota on top would add throttling the tier-2 procedure discourages.
 - **Checked.** `verify-run-record.mjs` fails a tier-2 record whose target ran outside the slice or without a memory limit.
 
-Two builds of the target run in one session against one snapshot, alternating, with `TARGET_REF` selecting the second. Seed once with the checkout; every trial after that uses `SKIP_LOAD=1`:
+- **Cycles.** With `SAMPLES_DIR` set to the session's `sample.sh` output, the orchestrator joins each trial's per-step cycles into its record ([cycles.mjs](../bench/cycles.mjs)) before verifying it. Verification fails a tier-2 record with a step that has none.
+
+A session for the reference, with two builds alternating against one snapshot and `TARGET_REF` selecting the second. Seed once with the checkout; every trial after that uses `SKIP_LOAD=1`:
 
 ```bash
-SCALE=bench TIER=2 TRIALS=0 COMPOSE_EXTRA=compose.tier2.yaml ./containers/run-benchmark.sh      # build, seed, snapshot
-SCALE=bench TIER=2 SKIP_LOAD=1 TRIALS=1 COMPOSE_EXTRA=compose.tier2.yaml ./containers/run-benchmark.sh                          # batched
-SCALE=bench TIER=2 SKIP_LOAD=1 TRIALS=1 COMPOSE_EXTRA=compose.tier2.yaml TARGET_REF='dd3a5f5^' ./containers/run-benchmark.sh  # before batching
+export SCALE=bench TIER=2 COMPOSE_EXTRA=compose.tier2.yaml SAMPLES_DIR=$S/samples \
+  PRE_START_HOOK='sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null'
+TRIALS=0 ./containers/run-benchmark.sh                                  # build, seed, snapshot
+SKIP_LOAD=1 TRIALS=1 ./containers/run-benchmark.sh                      # the checkout (batched quotes)
+SKIP_LOAD=1 TRIALS=1 TARGET_REF='dd3a5f5^' ./containers/run-benchmark.sh  # the build before batching
 ```
 
 The snapshot's provenance checks the build's schema, so `TARGET_REF` cannot restore a snapshot whose storage it does not match.

@@ -28,6 +28,8 @@
 #   SNAPSHOT_DIR     where snapshots and their provenance live       (containers/.snapshots)
 #   TARGET_CGROUPS   override the target's cgroups for CPU accounting, `name=id-or-/path,...`
 #   CONDITIONS_DIR   an external run-conditions record (tier 2: conditions.sh), referenced
+#   SAMPLES_DIR      tier 2: sample.sh's output directory; each trial's steps get their cycles
+#                    joined from it (bench/cycles.mjs), and verification requires them
 #   KEEP_TARGET=1    leave the target running at the end
 #   BENCH_ARGS       extra arguments for bench/run.mjs, e.g. `--quote-share 1` (recorded with the run)
 #   TARGET_REF       build the target's application code from this commit instead of the
@@ -338,6 +340,15 @@ while [ "$trial" -le "$TRIALS" ]; do
   fi
   record="$(sed -n 's/^run record: //p' "$log" | tail -1)"
   rm -f "$log"
+
+  # --- tier 2: per-step cycles from the host's sampler, joined into the record ------------
+  if [ -n "$record" ] && [ -n "${SAMPLES_DIR:-}" ]; then
+    say "trial $trial — joining cycle samples from $SAMPLES_DIR"
+    $COMPOSE run --rm --no-deps -v "$SAMPLES_DIR:/samples:ro" bench \
+      node bench/cycles.mjs --samples /samples --write "$record" || echo "trial $trial: some steps have no cycle data" >&2
+  elif [ -n "$record" ] && [ "$TIER" = 2 ]; then
+    echo "trial $trial: TIER=2 without SAMPLES_DIR — no cycle data; verification will fail" >&2
+  fi
 
   # --- run-level requirements and measurement rules, against the record just written ------
   # A trial that fails is re-run; its record is kept, never deleted.

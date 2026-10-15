@@ -43,6 +43,7 @@ A run retains per-request samples and conditions in `bench/results/run-<timestam
 | Dispatch lag | Record scheduled-arrival-to-dispatch lag per step (p50, p99, max). Above 5 ms at p99, the generator fell behind its own schedule. |
 | Target CPU | Read the target's cgroup v2 `cpu.stat` at each step boundary, per container and summed (`targetCpuSeconds`, `targetComponents`). Container runs only; see [accounting](../containers/README.md#accounting). |
 | Step boundaries | Record each step's wall-clock start, offer end, and drain end, so host-side samples can be joined to steps. |
+| Cycles (tier 2) | [cycles.mjs](cycles.mjs) joins the tier-2 sampler's per-cgroup perf counts (250 ms) to each step's window, offer start to drain end, prorating the intervals its edges cut. Each step gets target and generator gigacycles, effective GHz (cycles ÷ CPU time), IPC, and ops per gigacycle (successful reads ÷ target gigacycles). Verification fails a tier-2 record with a step that has none. |
 | In-flight ceiling | Shed and count read arrivals beyond the ceiling; a shed arrival still consumes its key draw, so the sequence stays identical across targets. Writes are outside the ceiling. |
 | Achieved rate | Successful responses completed *inside* the offer window. A step is `saturated` when it shed arrivals or completed under 95% of the offered rate in the window; its achieved rate is then a floor, not a capacity. |
 | Raw samples | Retain request samples for later distribution and interval analysis. |
@@ -58,7 +59,7 @@ A run retains per-request samples and conditions in `bench/results/run-<timestam
 ## Limitations
 
 - **No ground-truth correctness guard.** Every 2xx counts as success. Conformance checks determinism, but the harness does not compare responses with independently computed expected values. It needs pinned expected quotes derived from `SPEC.md`. Throughput currently says nothing about quote correctness.
-- **CPU clock is not pinned.** Do not derive cycle-normalized efficiency (ops per CPU-gigacycle) from any run produced here. On tier 2 the clock is bounded and measured on the host; nothing here joins those cycle samples to steps yet.
+- **CPU clock is not pinned.** Do not derive cycle-normalized efficiency (ops per CPU-gigacycle) from a tier-1 run. On tier 2 the clock is bounded and measured, and the cycle join gives each step its figures; it is tested against the qualification's per-CPU perf output, not yet against a real `sample.sh` capture.
 - **Target CPU is CPU-seconds, not cycles.** It is the cgroup's `usage_usec` from offer start to drain end, which includes the drain of the step's own tail. Harper is one container, so its breakdown is one component; an assembled stack gets one per container.
 - **No cross-target comparison.** The orchestrator implements resource limits, restore, and cold/warm/hot phases for one target. Identical treatment across implementations has not been demonstrated.
 - **Run verification checks what the record carries.** The orchestrator runs `scripts/verify-run-record.mjs` after every trial; it cannot check what was never recorded, such as quote correctness.

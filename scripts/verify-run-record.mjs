@@ -160,6 +160,16 @@ if (conditions.orchestrator?.tier === 2) {
 			fail('METHOD', `tier 2: target cgroup ${cgroup.name} is ${cgroup.dir}, outside bench-target.slice`);
 		}
 	}
+	// Cycles per step, joined from the host's samples by bench/cycles.mjs. Tier 2 exists for the
+	// efficiency figure; a run without them has none.
+	const uncounted = steps.filter((step) => !(step.cycles?.target?.gigacycles > 0));
+	if (uncounted.length) {
+		fail('METHOD', `tier 2: ${uncounted.length} of ${steps.length} steps have no cycle data (${uncounted.map((step) => step.label).join(', ')}); join sample.sh's output with bench/cycles.mjs (SAMPLES_DIR)`);
+	}
+	const clock = conditions.cycles?.effectiveGHz;
+	if (clock) {
+		notes.push(`effective clock ${clock.median.toFixed(3)} GHz, ${clock.min.toFixed(3)}–${clock.max.toFixed(3)} across steps; the drift rule compares each trial with the session median`);
+	}
 }
 for (const step of steps) {
 	if (step.encodedResponses > 0) {
@@ -191,7 +201,8 @@ console.log(`  ${steps.length} steps, write rate ${configuredRate}/s`);
 for (const step of steps) {
 	const hit = step.cacheHitRate === null ? 'n/a' : `${(step.cacheHitRate * 100).toFixed(1)}%`;
 	const cpu = step.targetCpuSeconds == null ? 'n/a' : `${step.targetCpuSeconds.toFixed(1)}s`;
-	console.log(`    ${String(step.label).padEnd(10)} writes ${String(step.writesIssued).padStart(5)} failed ${String(step.writeFailures ?? 0).padStart(4)} invalidated ${String(step.invalidations ?? 0).padStart(6)} cacheHit ${hit} targetCpu ${cpu}`);
+	const cycles = step.cycles ? ` Gcycles ${step.cycles.target.gigacycles.toFixed(1)} at ${step.cycles.target.effectiveGHz?.toFixed(3)} GHz, ${step.cycles.opsPerGigacycle?.toFixed(1)} ops/Gcycle` : '';
+	console.log(`    ${String(step.label).padEnd(10)} writes ${String(step.writesIssued).padStart(5)} failed ${String(step.writeFailures ?? 0).padStart(4)} invalidated ${String(step.invalidations ?? 0).padStart(6)} cacheHit ${hit} targetCpu ${cpu}${cycles}`);
 }
 for (const note of notes) console.log(`  ${note}`);
 

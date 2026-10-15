@@ -55,6 +55,11 @@ jobs:
       - name: The access distribution does what it claims
         run: npm run check:distribution
 
+      # Tier 2's efficiency figure: host cycle samples joined to each step's wall-clock window,
+      # tested against real perf output from the tier-2 qualification.
+      - name: The tier-2 cycle join attributes cycles to the right steps
+        run: npm run check:cycles
+
       # DATA-001/002/003/005 are properties of the committed artifact, not of a request.
       - name: The dataset matches its manifest and is not pre-joined
         run: npm run check:dataset

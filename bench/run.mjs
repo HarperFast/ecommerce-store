@@ -527,7 +527,7 @@ function caveats() {
 	if (tier !== 2) {
 		list.push(`Tier ${tier ?? 'unknown'}: CPU clock neither pinned nor measured — no cycle-normalized efficiency figure may be derived from this run.`);
 	} else {
-		list.push('Tier 2: clock bounded and measured on the host, not pinned. Cycle figures come from host samples joined on step epoch times, not from this record.');
+		list.push('Tier 2: clock bounded and measured on the host, not pinned. Cycle figures are joined into each step from host samples by bench/cycles.mjs; a published figure says "all-core turbo, measured at N GHz".');
 	}
 	if (manifest.scale !== 'bench') list.push(`Dataset "${manifest.scale}" fits in memory: not a benchmark result (DATA-004).`);
 	if (!cgroups.length || cgroups.some((cgroup) => !cgroup.dir)) list.push('Target CPU was not accounted for every target cgroup; targetCpuSeconds is null.');
