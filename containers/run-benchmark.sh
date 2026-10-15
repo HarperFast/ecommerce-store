@@ -15,7 +15,7 @@
 #
 # Settings (environment; containers/.env supplies defaults and never overrides what is set):
 #
-#   SCALE            dev | bench                                     (dev)
+#   SCALE            dev | bench; bench only with TIER=2             (dev)
 #   RATES DURATION   the ladder, offered rps and seconds per step    (25..200, 15)
 #   TRIALS           measured trials; 0 seeds and snapshots only     (1)
 #   SKIP_LOAD=1      restore the existing snapshot instead of seeding
@@ -64,13 +64,19 @@ while IFS='=' read -r key value || [ -n "$key" ]; do
 done < .env
 
 SCALE="${SCALE:-dev}"
+TIER="${TIER:-1}"
+# bench runs only on the tier-2 Linux host or a platform as a service: on a local machine its
+# DATA-004 evidence (a working set larger than memory) and its CPU figures cannot be trusted.
+if [ "$SCALE" = bench ] && [ "$TIER" != 2 ]; then
+  echo "SCALE=bench runs only on tier 2 (TIER=2) or a platform as a service; local runs use SCALE=dev" >&2
+  exit 1
+fi
 # Default ladder brackets the knee at BENCH scale, where the working set does not fit in
 # memory and capacity is an order of magnitude below dev. A 400-2400 ladder spent four of
 # its five steps past collapse, which locates nothing.
 RATES="${RATES:-25,50,75,100,125,150,200}"
 DURATION="${DURATION:-15}"
 TRIALS="${TRIALS:-1}"
-TIER="${TIER:-1}"
 # package.json is the one source of truth for the platform version, as in CI. The Dockerfile
 # and compose defaults are fallbacks for manual builds and must not drift from it.
 export HARPER_VERSION="${HARPER_VERSION:-$(node -p "require('../package.json').devDependencies.harper")}"

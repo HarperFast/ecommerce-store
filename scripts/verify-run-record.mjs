@@ -18,6 +18,7 @@
  * COVERS: DATA-004 WRITE-001 WRITE-003 WRITE-004
  */
 import { readFile } from 'node:fs/promises';
+import { WARMUP } from '@ecommerce-store/spec';
 
 const args = process.argv.slice(2);
 const DEV = args.includes('--dev');
@@ -116,6 +117,16 @@ if (!conditions.orchestrator) fail('METHOD', 'no orchestrator conditions: not a 
 else if (conditions.orchestrator.coldStart?.ms == null) fail('METHOD', 'no cold-start measurement');
 else if (!conditions.orchestrator.preStartHook && conditions.dataset?.scale === 'bench') {
 	fail('METHOD', 'no page-cache drop before the cold start: the target read data the restore cached outside its budget');
+}
+// The warm-up is fixed per scale and identical for every target (run lifecycle): a target given
+// a shorter one is measured with a colder cache than the others.
+const expectedWarmup = WARMUP[conditions.dataset?.scale] ?? WARMUP.dev;
+const warmup = conditions.harness?.warmup;
+const warmed = conditions.lifecycle?.warmup;
+if (!warmup || warmup.requests !== expectedWarmup.requests || warmup.rate !== expectedWarmup.rate) {
+	fail('METHOD', `warm-up was ${warmup ? `${warmup.requests} requests at ${warmup.rate} rps` : 'unrecorded'}; the ${conditions.dataset?.scale} warm-up is ${expectedWarmup.requests} at ${expectedWarmup.rate}`);
+} else if (!warmed || Math.abs(warmed.issued + warmed.shed - warmup.requests) > Math.max(1, warmup.requests * 0.001)) {
+	fail('METHOD', `the warm-up offered ${warmed ? warmed.issued + warmed.shed : 'no'} of its ${warmup.requests} requests`);
 }
 for (const step of steps) {
 	if (step.encodedResponses > 0) {

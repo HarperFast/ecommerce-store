@@ -6,16 +6,16 @@ Local benchmark topology with a fixed target budget and a separate load generato
 
 Requires Docker or Podman with Compose. Copy `containers/.env.example` to `containers/.env` and set the local test credentials required by Harper's non-interactive installer.
 
-For development:
+Locally, run `dev` only:
 
 ```bash
 SCALE=dev ./containers/run-benchmark.sh
 ```
 
-For the benchmark dataset and repeated trials:
+**`bench` never runs locally.** It runs only on the tier-2 Linux host or a platform as a service, where its evidence — including `DATA-004`, a working set larger than memory — can be trusted. The orchestrator refuses `SCALE=bench` unless `TIER=2`. On the tier-2 host, with the slice placement and the page-cache drop:
 
 ```bash
-SCALE=bench TRIALS=3 ./containers/run-benchmark.sh
+SCALE=bench TIER=2 TRIALS=3 COMPOSE_EXTRA=compose.tier2.yaml PRE_START_HOOK='sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null' ./containers/run-benchmark.sh
 ```
 
 `dev` is for iteration only. Benchmark data requires Git LFS; see [setup](../CONTRIBUTING.md#setup).
@@ -58,7 +58,7 @@ These choices affect measurements and must match across targets:
 1. **Seed:** expand, verify, and load the dataset into an emptied volume; loading is not measured.
 2. **Snapshot:** archive the loaded state for trial restore, with a provenance record beside it.
 3. **Cold start:** stop the target, run `PRE_START_HOOK`, start it, and record the time to the first successful (2xx) response. The probe polls the published port from the host every 25 ms ([wait-ready.mjs](wait-ready.mjs)).
-4. **Warm-up:** drive a fixed workload, identical across targets.
+4. **Warm-up:** drive a fixed workload, identical across targets: 120,000 requests at 100 rps on `bench` (about 20 minutes, long enough for a target to fill its memory budget), 2,000 at 200 rps on `dev`.
 5. **Measure:** run the load ladder.
 6. **Verify:** check the run record with [verify-run-record.mjs](../scripts/verify-run-record.mjs). A failing trial, or one whose generator failed, is reported and its record kept; re-run it.
 

@@ -33,7 +33,7 @@ import { join } from 'node:path';
 import { cpus, totalmem, platform, release } from 'node:os';
 import { makeRequestFactory, makeWriterFactory, planWrites, sampleIds, writeKeys } from './workload.mjs';
 import { accountStep, readAll, resolveCgroups } from './cgroups.mjs';
-import { ACCESS_SKEW, SCRAMBLE_SEED } from '@ecommerce-store/spec';
+import { ACCESS_SKEW, SCRAMBLE_SEED, WARMUP } from '@ecommerce-store/spec';
 
 const execFileAsync = promisify(execFile);
 
@@ -69,7 +69,9 @@ const DATASET = argOf('dataset', SCALE === 'dev'
 	: join(import.meta.dirname, '..', '.work', 'dataset', SCALE));
 const RATES = argOf('rates', '25,50,100,200').split(',').map(Number);
 const DURATION = Number(argOf('duration', '15'));
-const WARMUP = Number(argOf('warmup', '10'));
+/** Overrides of the scale's fixed warm-up (WARMUP in @ecommerce-store/spec); recorded, and a mismatch fails verification. */
+const WARMUP_REQUESTS = argOf('warmup-requests', null);
+const WARMUP_RATE = argOf('warmup-rate', null);
 const QUOTE_SHARE = Number(argOf('quote-share', '0.5'));
 const WRITE_RATE = Number(argOf('write-rate', '20'));
 const OUT = argOf('out', join(import.meta.dirname, 'results'));
@@ -431,8 +433,16 @@ const [cartIds, productIds] = await Promise.all([
 
 const REQUEST_SEED = 1;
 const WRITE_SEED = 7;
+const warmupDefault = WARMUP[manifest.scale] ?? WARMUP.dev;
+const warmup = {
+	requests: WARMUP_REQUESTS === null ? warmupDefault.requests : Number(WARMUP_REQUESTS),
+	rate: WARMUP_RATE === null ? warmupDefault.rate : Number(WARMUP_RATE),
+	policy: `fixed, ${WARMUP[manifest.scale] ? manifest.scale : 'dev'} default${WARMUP_REQUESTS === null && WARMUP_RATE === null ? '' : ', overridden'}`,
+};
+warmup.seconds = warmup.requests / warmup.rate;
+
 // Exactly the writes the warm-up and the ladder will issue.
-const plannedWrites = [WARMUP, ...RATES.map(() => DURATION)].reduce((sum, seconds) => sum + Math.round(WRITE_RATE * seconds), 0);
+const plannedWrites = [warmup.seconds, ...RATES.map(() => DURATION)].reduce((sum, seconds) => sum + Math.round(WRITE_RATE * seconds), 0);
 const plan = planWrites({ productCount: productIds.length, total: Math.max(1, plannedWrites), seed: WRITE_SEED });
 const keys = await writeKeys(DATASET, [...new Set(plan.map((write) => productIds[write.productIndex]))]);
 const nextRequest = makeRequestFactory({ baseUrl: BASE_URL, cartIds, productIds, quoteShare: QUOTE_SHARE, seed: REQUEST_SEED });
@@ -509,7 +519,7 @@ async function writeRecord(warm, steps, complete) {
 					orchestrator: ORCHESTRATOR_CONDITIONS,
 					harness: {
 						rates: RATES, quoteShare: QUOTE_SHARE, writeRate: WRITE_RATE, durationSeconds: DURATION,
-						warmupSeconds: WARMUP, warmupRate: RATES[0], maxInFlight: MAX_IN_FLIGHT,
+						warmup, maxInFlight: MAX_IN_FLIGHT,
 						drainMs: DRAIN_MS, quiesceMs: QUIESCE_MS, writeTimeoutMs: WRITE_TIMEOUT_MS,
 						arrivals: 'deterministic, evenly spaced, dispatched on a 2 ms tick',
 						seeds: { requests: REQUEST_SEED, writes: WRITE_SEED },
@@ -529,7 +539,9 @@ async function writeRecord(warm, steps, complete) {
 						coldStartMs: COLD_MS === null ? null : Number(COLD_MS),
 						// The earliest-DISPATCHED warm-up request, not the first to complete.
 						warmupFirstResponseMs: warm ? (warm.samples.reduce((first, s) => (!first || s.doneMs - s.ms < first.doneMs - first.ms ? s : first), null)?.ms ?? null) : null,
-						warmup: warm ? { startedAtEpochMs: warm.startedAtEpochMs, drainEndEpochMs: warm.drainEndEpochMs, errors: warm.errors } : null,
+						warmup: warm
+							? { startedAtEpochMs: warm.startedAtEpochMs, drainEndEpochMs: warm.drainEndEpochMs, issued: warm.issued, shed: warm.shed, ok: warm.ok, errors: warm.errors }
+							: null,
 					},
 					caveats: caveats(),
 				},
@@ -551,8 +563,8 @@ console.log(`opened ${CONNECTIONS} connections`);
 
 // COLD is measured by the caller restarting the target; this harness reports the first
 // observation of the warm-up step separately so the number is not silently lost.
-console.log(`warm-up ${WARMUP}s at ${RATES[0]} rps (not reported as a result)`);
-const warm = await step({ rate: RATES[0], seconds: WARMUP, nextRequest, nextWrite, writeRate: WRITE_RATE, label: 'warmup' });
+console.log(`warm-up ${warmup.requests} requests at ${warmup.rate} rps, ${warmup.seconds}s (${warmup.policy}; not reported as a result)`);
+const warm = await step({ rate: warmup.rate, seconds: warmup.seconds, nextRequest, nextWrite, writeRate: WRITE_RATE, label: 'warmup' });
 console.log(`  ${warm.errors} errors\n`);
 await new Promise((resolve) => setTimeout(resolve, QUIESCE_MS));
 

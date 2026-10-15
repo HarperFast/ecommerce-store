@@ -12,6 +12,8 @@ Use the [container workflow](../containers/README.md) to set resource limits and
 SCALE=dev ./containers/run-benchmark.sh
 ```
 
+Local runs use `dev` only. `bench` runs only on the tier-2 Linux host or a platform as a service; see the [container workflow](../containers/README.md#run).
+
 For local iteration against a running Harper instance:
 
 ```bash
@@ -21,7 +23,7 @@ node bench/run.mjs --duration 12
 
 Direct runs have no fixed resource budget, snapshot restore, cold-start measurement, or target CPU figure. Their output is not a result.
 
-`--rates` overrides the load ladder. The default targets the suspected saturation range at `bench` scale and is low for `dev`.
+`--rates` overrides the load ladder. The default targets the suspected saturation range at `bench` scale and is low for `dev`. The warm-up is fixed per scale (`WARMUP` in `@ecommerce-store/spec`); `--warmup-requests` and `--warmup-rate` override it for experiments, and a run whose warm-up differs fails verification.
 
 ## Data and output
 
@@ -46,6 +48,7 @@ A run retains per-request samples and conditions in `bench/results/run-<timestam
 | Access skew | Draw every cart and product with the dataset's scrambled Zipf; weight tier and region to the seeded customer population. |
 | Generator memory | Record the generator's peak RSS, heap, and container cgroup peak against its limit; it holds every cart and product id. |
 | Cache behavior | Record the product endpoint's cache-hit rate (the quote is never cacheable) and the write surface's reported invalidations. Flag a zero hit rate, which may indicate the caching shortcut forbidden by `WRITE-003`. |
+| Warm-up | A fixed number of requests at a fixed rate, from the same request stream as the ladder: 120,000 at 100 rps on `bench`, 2,000 at 200 rps on `dev`. Recorded with what it actually offered; verification fails a mismatch. |
 | Connection pool | 32 keep-alive connections opened before the warm-up and used least-recently-used first (`--connections`). Few connections pin a multi-threaded target's work to the workers the kernel assigned them. |
 | No compression | Request `accept-encoding: identity` and count encoded responses; any fails verification. |
 | Partial records | Rewrite the run record after every step, so a generator that dies keeps the steps it finished (`complete: false`). |

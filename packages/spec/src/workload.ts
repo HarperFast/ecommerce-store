@@ -138,6 +138,22 @@ export function zipfIndex(u: number, n: number): number {
 }
 
 /**
+ * The fixed warm-up before every measured ladder, by dataset scale. The run lifecycle requires
+ * it to be identical in volume and key distribution for every target: it is drawn from the same
+ * request stream as the ladder, so only its length and rate are set here.
+ *
+ * `bench`: 120,000 requests at 100 rps, about 20 minutes. At 100 rps from a cold page cache the
+ * Harper target filled 87% of its 2 GiB in 10 minutes and was still rising about 26 MiB a
+ * minute, so 20 minutes brings a target to its memory budget before anything is measured;
+ * a short warm-up measured a cache still filling. `dev` fits in memory and only needs its
+ * caches loaded.
+ */
+export const WARMUP: Readonly<Record<string, { requests: number; rate: number }>> = {
+	bench: { requests: 120_000, rate: 100 },
+	dev: { requests: 2_000, rate: 200 },
+};
+
+/**
  * Request-side tier and region weights.
  *
  * Tier mirrors the seeded customer population; drawing them uniformly made every tier

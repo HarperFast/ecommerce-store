@@ -1,6 +1,6 @@
 # Development plan
 
-**Last updated:** 2026-10-14 · **Spec version:** `0.2.0-draft` · **Harper:** `5.3.2` · **Dataset generator:** `0.5.0`
+**Last updated:** 2026-10-15 · **Spec version:** `0.2.0-draft` · **Harper:** `5.3.2` · **Dataset generator:** `0.5.0`
 
 This file tracks status, blockers, and observations. [README.md](../README.md) introduces the application. Requirement ids live in [SPEC.md](../SPEC.md) and its registry; coverage comes from `npm run check`; dataset counts and hashes come from each `MANIFEST.json`.
 
@@ -30,6 +30,8 @@ Results are never published from this repo.
 
 ## Recent work
 
+- **2026-10-15 — Two decisions (Ethan):** the `bench` warm-up is fixed at 120,000 requests at 100 rps, about 20 minutes, from the 10-minute soak below; `dev` keeps 2,000 at 200 rps. Both live in `WARMUP` in `@ecommerce-store/spec`, are recorded with each run, and are checked by `verify-run-record.mjs`. And `bench` runs only on the tier-2 host or a platform as a service, never locally.
+
 - **2026-10-14 — Realistic access, regenerated dataset** (same branch; Ethan approved the regeneration for this change and kept it in one PR):
   - **Distribution.** A discrete Zipf over rank (`s = 0.8845`, solved so the hottest 1% of the 2,000,000-product catalog takes half the draws), scrambled from rank to key by a seeded Feistel bijection. The hottest product takes 2.6% of draws, not 22.5%, and hot keys are spread across the id space. Stated in [SPEC.md](../SPEC.md#access-distribution); checked by counting draws in `npm run check`.
   - **Dataset `0.5.0`.** Only `cart` changed; every other table is byte-identical. The measured `bench` cart-line mass is 50.0% on the hottest 1% and 2.54% on the top product. See [regenerations](seed-design.md#regenerations).
@@ -51,7 +53,7 @@ Validation: full `npm run check` passes in this checkout, including deployment s
 
 ## Next
 
-1. **Run `bench` ladders at steady state, then on tier 2.** A 5.3.2 snapshot of dataset `0.5.0` exists (`containers/.snapshots/bench-harper-5.3.2-dataset-0.5.0.tar.gz` in the main checkout); `SKIP_LOAD=1` restores it. Settle the warm-up first: within 10 minutes the target's memory had not yet filled (below).
+1. **Run `bench` on the tier-2 host.** `bench` no longer runs locally: local container runs use `dev`, and the orchestrator refuses `SCALE=bench` without `TIER=2`. `DATA-004` evidence comes from tier 2. The warm-up is decided: 120,000 requests at 100 rps, about 20 minutes, fixed for every target. The local 5.3.2 snapshots stay in the main checkout's `containers/.snapshots/`.
 2. **Re-run the Fastify + Postgres + Redis target (application-architecture-benchmarks #6) against dataset `0.5.0`.** It is pinned to `1f4a350`, which carries the `0.4.0` dataset and the old access distribution.
 3. **Add independent expected values.** Build a correctness suite keyed to the dataset manifest checksum. Conformance checks shape and consistency; the harness also needs expected quotes derived independently from the implementation under test. Publish expected values as data so every stack compares against the same answers without sharing pricing code.
 4. **Confirm `FRESH_MS`.** The provisional budget in [Background writes](../SPEC.md#background-writes) needs run evidence; `PDP-003` and `WRITE-002` depend on it.
@@ -85,7 +87,7 @@ The warm cache was the restore's, charged to no target; the orchestrator now dro
 
 A 10-minute soak at 100 rps from a dropped cache shows where the working set lands. The target's memory climbed from 524 MiB a minute in to 1,774 MiB (87% of budget) and was still rising about 26 MiB a minute at the end; anonymous memory levelled at 973 MiB (heaps plus Harper's 512 MiB block cache), and page cache reached 769 MiB. It read 531 MiB from disk during the step, about 22 MiB a minute by the end, with no page-cache refaults. p50 16.0 ms, p99 222 ms, product hits 6.5%, target CPU 1.19 cores.
 
-**`DATA-004` is not yet demonstrated.** The catalog is three times the budget, every key is reachable, and the target keeps reading its cold tail from disk, but within 10 minutes its memory had not filled and nothing was evicted and re-read. `verify-run-record.mjs` failed all three runs on that check, as it should. At the soak's final growth rate the cache fills in roughly another 10 minutes; measured steps then run under eviction. That is a warm-up decision.
+**`DATA-004` is not yet demonstrated.** The catalog is three times the budget, every key is reachable, and the target keeps reading its cold tail from disk, but within 10 minutes its memory had not filled and nothing was evicted and re-read. `verify-run-record.mjs` failed all three runs on that check, as it should. At the soak's final growth rate the cache fills in roughly another 10 minutes, which set the `bench` warm-up at 20 minutes (120,000 requests at 100 rps). These were the last local `bench` runs: `bench` now runs only on tier 2, where the evidence for `DATA-004` will come from.
 
 ## Bench-scale observations on 5.3.2, dataset 0.4.0 (2026-10-12)
 
@@ -141,7 +143,7 @@ Follow-up hypotheses:
 | **Unexplained `dev` latency.** One step had p90 in seconds; a higher step had single-digit milliseconds. Quotes were slow, not products. | Recheck on 5.3.2 with the dispatch fix; see the 2026-10-05 hypothesis about pre-5.3.1 write-lock release. |
 | **The write surface and response details are specified by tests, not `SPEC.md`.** The harness and suite require `POST /admin/variant/:sku` `{basePrice}`, `POST /admin/inventory/:id` `{onHand}`, an `invalidated` count in each write response, the `Server-Timing` grammar (`cache;desc=hit\|miss`, `data`, `compute`, `total`), and quote fields (`currency`, `region`, `taxJurisdiction`, `totalWeight`) that only [model.ts](../packages/spec/src/model.ts) names. | Specify them, or name `packages/spec` as normative, before a second implementation is built against the prose. |
 | **Metric definitions differ across stacks.** `invalidated` counts keys targeted (Harper writes an invalidation marker even for a never-cached key); a Redis `DEL` count is keys removed. Harper reports a request that waited on another request's in-flight fill as a hit. `total` excludes response serialization in both handlers. | Define each in `SPEC.md` so cache-hit rates and invalidation fan-out compare. |
-| **`DATA-004` needs a steady state.** With every key reachable and the cache dropped, a 10-minute soak filled 87% of the target's memory and was still growing; nothing was evicted. `verify-run-record.mjs` now checks memory against the budget and fails such a run. | Warm up until the target's memory reaches its budget (about 20 minutes at 100 rps here), identical across targets, then measure; re-run the first rate at the end to measure drift. |
+| **`DATA-004` is undemonstrated.** With every key reachable and the cache dropped, a local 10-minute soak filled 87% of the target's memory and was still growing; nothing was evicted. `verify-run-record.mjs` checks memory against the budget and fails such a run. | Decided: a fixed `bench` warm-up of 120,000 requests at 100 rps (about 20 minutes), which verification checks. Show `DATA-004` on tier 2; `bench` no longer runs locally. Re-running the first rate at the end to measure drift is still open. |
 | **The Fastify target uses the old dataset.** application-architecture-benchmarks #6 is pinned to `1f4a350` (dataset `0.4.0`, the old distribution). | Follow up against dataset `0.5.0` before any comparison. |
 | **Arrivals are evenly spaced.** Deterministic spacing understates queueing against Poisson arrivals at the same utilization. | Decide whether to offer seeded Poisson arrivals. |
 | **Network softirq is not charged to a cgroup.** Bridge traffic between a separated stack's containers is partly unaccounted, and on tier 2 may run outside the target's CPUs; Harper has no such hops. | On tier 2, record per-step softirq for the target CPUs, or steer bridge interrupts onto them; disclose either way. |
