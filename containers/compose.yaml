@@ -29,7 +29,9 @@ services:
   harper:
     # Tagged per build, so two builds of the target can coexist in one session: the orchestrator
     # sets TARGET_CONTEXT and TARGET_IMAGE_TAG when TARGET_REF names a commit (run-benchmark.sh).
-    image: harper-ecommerce-bench-harper:${TARGET_IMAGE_TAG:-checkout}
+    # TARGET_IMAGE names the repository. Image names are global to the host, not to a compose
+    # project, so another project building this target sets its own to keep from replacing ours.
+    image: ${TARGET_IMAGE:-harper-ecommerce-bench-harper}:${TARGET_IMAGE_TAG:-checkout}
     build:
       context: ${TARGET_CONTEXT:-..}
       # The checkout's Dockerfile for every build, so builds differ only in application code.

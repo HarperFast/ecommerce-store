@@ -31,6 +31,7 @@ The header of [run-benchmark.sh](run-benchmark.sh) lists every setting. The ones
 | `PRE_START_HOOK` | Host command run between stopping the target and its measured start, to drop the page cache the restore filled outside the target's budget. On a Podman machine it defaults to dropping the VM's cache, which also cools every other container on the machine; tier 2 sets it to drop the host's, as root. A `bench` record without one fails verification. |
 | `DATASET_ROOT`, `SNAPSHOT_DIR` | Where expanded datasets and snapshots live, so a worktree can use another checkout's. |
 | `KEEP_TARGET=1` | Leave the target running afterwards; by default it is stopped. |
+| `TARGET_IMAGE` | The target image's repository, `<compose project>-harper` by default; each build is a tag. Image names are host-wide, so a second compose project building this target sets its own. |
 | `TARGET_REF` | Build the target's application code from this commit, for example `dd3a5f5^`, the build before quote batching. Each build is its own image, tagged by commit; the Dockerfile, harness, and snapshot stay the checkout's. The record names the build in `conditions.code.commit` and `orchestrator.target.build`. |
 
 ## Resource budget
