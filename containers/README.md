@@ -4,7 +4,7 @@ Local benchmark topology with a fixed target budget and a separate load generato
 
 ## Run
 
-Requires Docker or Podman with Compose. Copy `containers/.env.example` to `containers/.env` and set the local test credentials required by Harper's non-interactive installer.
+Requires Docker or Podman with Compose, and the workspace installed: the harness and the verifier import `@ecommerce-store/spec` through it, and the orchestrator refuses to start without it. On a fresh checkout, including the tier-2 host, run `npm install --ignore-scripts --no-audit --no-fund` at the repository root first (`npm install`, as CI does: the lock file's platform-specific optional packages resolve differently across platforms). Copy `containers/.env.example` to `containers/.env` and set the local test credentials required by Harper's non-interactive installer.
 
 Locally, run `dev` only:
 

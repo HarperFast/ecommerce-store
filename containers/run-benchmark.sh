@@ -55,6 +55,15 @@ else
   exit 1
 fi
 
+# The harness and the verifier run from this checkout (mounted into the generator) and import
+# @ecommerce-store/spec through the workspace link npm creates. A fresh clone has none, and would
+# fail only after the build and the seed.
+if [ ! -f "$REPO/node_modules/@ecommerce-store/spec/package.json" ]; then
+  echo "the workspace is not installed: run \`npm install --ignore-scripts --no-audit --no-fund\` in $REPO first" >&2
+  echo "(the harness and verify-run-record.mjs import @ecommerce-store/spec from it)" >&2
+  exit 1
+fi
+
 # Load the local container settings — the loader authenticates against the operations API,
 # which `harper run` requires. A variable already set in the environment wins: sourcing the
 # file with `set -a` silently replaced `TARGET_CPUS=4 ./run-benchmark.sh` with the file's 2.

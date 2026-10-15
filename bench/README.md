@@ -12,7 +12,7 @@ Use the [container workflow](../containers/README.md) to set resource limits and
 SCALE=dev ./containers/run-benchmark.sh
 ```
 
-Local runs use `dev` only. `bench` runs only on the tier-2 Linux host or a platform as a service; see the [container workflow](../containers/README.md#run).
+Local runs use `dev` only. `bench` runs only on the tier-2 Linux host or a platform as a service; see the [container workflow](../containers/README.md#run). A fresh checkout, the tier-2 host's included, needs `npm install --ignore-scripts --no-audit --no-fund` at the repository root first: the harness and the verifier import `@ecommerce-store/spec` from the workspace.
 
 For local iteration against a running Harper instance:
 
