@@ -128,6 +128,25 @@ if (!warmup || warmup.requests !== expectedWarmup.requests || warmup.rate !== ex
 } else if (!warmed || Math.abs(warmed.issued + warmed.shed - warmup.requests) > Math.max(1, warmup.requests * 0.001)) {
 	fail('METHOD', `the warm-up offered ${warmed ? warmed.issued + warmed.shed : 'no'} of its ${warmup.requests} requests`);
 }
+// Tier 2: placement in the host's slices (application-architecture-benchmarks,
+// environments/gcp). A container left unplaced lands in system.slice on the housekeeping CPUs,
+// outside the budget and beside the Docker daemon, and still produces a plausible record.
+if (conditions.orchestrator?.tier === 2) {
+	const applied = conditions.orchestrator.target?.applied;
+	if (applied) {
+		if (applied.cgroupParent !== 'bench-target.slice') {
+			fail('METHOD', `tier 2: the target's cgroup parent is ${applied.cgroupParent ?? 'unset'}, not bench-target.slice; it ran outside the target's slice (COMPOSE_EXTRA=compose.tier2.yaml)`);
+		}
+		// A container cannot see its slice's limits, and Harper sizes its block cache and heaps
+		// from its own: without one it sizes from the whole VM.
+		if (!applied.memoryBytes) fail('METHOD', "tier 2: the target has no memory limit of its own, so it sized its caches from the whole VM's memory");
+	}
+	for (const cgroup of conditions.harness?.targetCgroups ?? []) {
+		if (cgroup.dir && !/\/bench-target\.slice(\/|$)/.test(cgroup.dir)) {
+			fail('METHOD', `tier 2: target cgroup ${cgroup.name} is ${cgroup.dir}, outside bench-target.slice`);
+		}
+	}
+}
 for (const step of steps) {
 	if (step.encodedResponses > 0) {
 		fail('METHOD', `step ${step.label}: ${step.encodedResponses} compressed responses — compression is excluded for every target`);

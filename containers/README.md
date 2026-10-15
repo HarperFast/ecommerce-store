@@ -41,6 +41,14 @@ The header of [run-benchmark.sh](run-benchmark.sh) lists every setting. The ones
 
 A competing stack must fit all its processes—framework, database, and cache—within the target budget. The generator stays outside that budget. Harper defaults to two worker threads here to match its CPU allocation.
 
+## Tier 2
+
+On the tier-2 host ([application-architecture-benchmarks](https://github.com/HarperFast/application-architecture-benchmarks), `environments/gcp`), `COMPOSE_EXTRA=compose.tier2.yaml` places the target in `bench-target.slice` (CPUs 2–3, 2 GiB, no swap) and the generator in `bench-generator.slice` (CPUs 4–7), the slices `host-setup.sh` creates.
+
+- **Memory limit kept.** A container cannot see its slice's limits. Harper sizes its block cache and worker heaps from its own container's limit, so the target keeps an explicit 2 GiB one; without it Harper would size from the VM's memory.
+- **CPU quota dropped.** The slice's cpuset already gives two cores, and Harper's thread count is explicit. A quota on top would add throttling the tier-2 procedure discourages.
+- **Checked.** `verify-run-record.mjs` fails a tier-2 record whose target ran outside the slice or without a memory limit.
+
 ## Fixed run conditions
 
 These choices affect measurements and must match across targets:
