@@ -66,6 +66,17 @@ A run retains per-request samples and conditions in `bench/results/run-<timestam
 
 Dated observations and unresolved behavior belong in [docs/plan.md](../docs/plan.md#first-bench-scale-observations-2026-10-05), not a results report. Nothing from `dev` is reportable.
 
+## DATA-004 memory evidence
+
+`DATA-004` requires a working set larger than the target's memory. [verify-run-record.mjs](../scripts/verify-run-record.mjs) looks for it in the record's per-cgroup readings ([memory-pressure.mjs](../scripts/memory-pressure.mjs)):
+
+- **Per cgroup.** Each target cgroup with a memory limit of its own is judged against that limit, so the rule does not depend on how a target divides its budget. A separated stack's database pinned at its own limit counts, whatever its application and cache hold.
+- **Summed.** When a cgroup has no limit of its own, or a target has several, the summed peaks are also judged against the budget the orchestrator recorded.
+- **Holds** when any basis is pressed and still reading: its `memory.peak`, page cache included, reached 90% of the limit, and in every measured step its cgroups read at least 1 MiB from disk or refaulted evicted page cache.
+- **Fails** a working set that fits: a target that never neared its limit, or one pinned at its limit that stopped reading, because everything it reads is already cached.
+
+The verifier prints the basis that met it, or every basis it judged. On tier 2, naming the slice itself as the target cgroup (`TARGET_CGROUPS=target=/bench.slice/bench-target.slice`) judges the slice's `memory.peak` against its 2 GiB.
+
 ## Access distribution
 
 Uniform draws over product × tier × region rarely revisit a key during a short run, making cache hits and invalidation costs hard to measure. Too few reachable keys, or too much mass on one, measures a cache that holds everything. The shared distribution in `@ecommerce-store/spec`, stated in [SPEC.md](../SPEC.md#access-distribution), is a discrete Zipf (`s = 0.8845`) over every cart and product, scrambled so hot keys are spread across the id space: the hottest 1% of products take half the draws and the hottest one 2.6%.

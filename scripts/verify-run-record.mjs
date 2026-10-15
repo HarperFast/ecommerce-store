@@ -19,6 +19,7 @@
  */
 import { readFile } from 'node:fs/promises';
 import { PUBLISHED_RUN, WARMUP } from '@ecommerce-store/spec';
+import { memoryPressure } from './memory-pressure.mjs';
 
 const args = process.argv.slice(2);
 const DEV = args.includes('--dev');
@@ -58,23 +59,12 @@ if (!reachable) {
 		}
 	}
 }
-// The target must have pressed against its memory budget: with a working set larger than
-// memory, its cgroup (page cache included) fills to the limit. One that never came near it
-// held the whole working set.
-const memoryLimit = conditions.orchestrator?.target?.applied?.memoryBytes;
-const lastStep = steps.at(-1);
-const memoryPeak = lastStep?.targetComponents?.every((c) => c.memoryPeakSinceStartBytes != null)
-	? lastStep.targetComponents.reduce((sum, c) => sum + c.memoryPeakSinceStartBytes, 0)
-	: null;
-if (memoryLimit && memoryPeak !== null) {
-	const share = memoryPeak / memoryLimit;
-	notes.push(`target memory peak ${(memoryPeak / 2 ** 20).toFixed(0)} MiB of ${(memoryLimit / 2 ** 20).toFixed(0)} MiB (${(share * 100).toFixed(0)}%)`);
-	if (conditions.dataset?.scale === 'bench' && share < 0.9) {
-		fail('DATA-004', `the target's memory peaked at ${(share * 100).toFixed(0)}% of its budget; the working set fit in memory`);
-	}
-} else if (conditions.dataset?.scale === 'bench') {
-	fail('DATA-004', 'the record carries no target memory peak against its budget');
-}
+// The working set must not have fit: some target cgroup pressed against its own limit while
+// still reading from disk (scripts/memory-pressure.mjs, bench/README.md#data-004-memory-evidence).
+const pressure = memoryPressure(record);
+for (const line of pressure.detail) notes.push(`memory ${line}`);
+notes.push(`DATA-004 memory basis: ${pressure.basis ?? 'none met'}`);
+if (conditions.dataset?.scale === 'bench' && !pressure.holds) fail('DATA-004', pressure.reason);
 
 // --- WRITE-001 / WRITE-004: the write stream actually ran, at the configured rate --------
 const configuredRate = conditions.harness?.writeRate ?? 0;

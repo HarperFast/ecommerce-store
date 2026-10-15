@@ -60,6 +60,10 @@ jobs:
       - name: The tier-2 cycle join attributes cycles to the right steps
         run: npm run check:cycles
 
+      # DATA-004's memory evidence must not depend on how a target divides its budget.
+      - name: The working-set test is fair to a split budget and fails one that fits
+        run: npm run check:memory
+
       # DATA-001/002/003/005 are properties of the committed artifact, not of a request.
       - name: The dataset matches its manifest and is not pre-joined
         run: npm run check:dataset
