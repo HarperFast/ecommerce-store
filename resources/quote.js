@@ -219,8 +219,8 @@ export class quote extends Resource {
  *
  * Then the rows carried `tierKeys` / `categoryKeys` — the same values, or `['*']` when
  * unrestricted — probed with one `in` per dimension and ANDed. Correct, and on `bench` still
- * about as slow as the scan: Harper 5.3.2 answers `in` by walking the attribute's whole index,
- * then reads every row the first condition matches to test the second
+ * about as slow as the scan: Harper 5.3.2 answers `in` by walking the attribute's whole index
+ * (harper#3240), then reads every row the first condition matches to test the second
  * (docs/data-model.md#promotion-eligibility-index).
  *
  * Now each row carries one `eligibilityKeys` entry per (tier key, category key) pair — the
