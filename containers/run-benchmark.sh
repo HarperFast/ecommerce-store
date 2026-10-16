@@ -38,6 +38,8 @@
 #                    snapshot's); the Dockerfile, harness and snapshot are the
 #                    checkout's, and the record names the commit each trial's target came from
 #   ALLOW_UNVERIFIED_SNAPSHOT=1   restore a snapshot whose provenance is missing or differs
+#   SERVER_TIMING_WAVES=1  per-wave Server-Timing entries in the target; diagnostics only, so
+#                    measured trials refuse it (containers/README.md)
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
@@ -96,6 +98,10 @@ RATES="${RATES:-25,50,75,100,125,150,200}"
 # a 15 s step could misattribute up to ~3% of its cycles at its boundaries.
 DURATION="${DURATION:-$([ "$SCALE" = bench ] && echo 60 || echo 15)}"
 TRIALS="${TRIALS:-1}"
+if [ "${SERVER_TIMING_WAVES:-}" = 1 ] && [ "$TRIALS" != 0 ]; then
+  echo "SERVER_TIMING_WAVES=1 is for diagnostics; measured trials run without it (see containers/README.md)" >&2
+  exit 1
+fi
 # package.json is the one source of truth for the platform version, as in CI. The Dockerfile
 # and compose defaults are fallbacks for manual builds and must not drift from it.
 export HARPER_VERSION="${HARPER_VERSION:-$(node -p "require('../package.json').devDependencies.harper")}"
