@@ -10,8 +10,8 @@
  * cart → variants → products → promotions sets the latency, with customer → inventory beside it.
  */
 import { Resource, tables } from 'harper';
-import { UNRESTRICTED } from '@ecommerce-store/spec';
 import { lookupTable } from './lib/lookup.js';
+import { probeKeys } from './lib/promotion-index.js';
 import { evaluatePromotions, isEligible, resolveShipping, resolveTax, resolveUnitPrice } from './lib/pricing.js';
 
 const { Cart, Customer, Product, Variant, Inventory, Location, Promotion, Rate } = tables;
@@ -207,7 +207,7 @@ export class quote extends Resource {
 /**
  * Candidate promotions, by indexed probe.
  *
- * This has been wrong twice, in opposite directions, and both failures are instructive.
+ * This has been wrong three times, and each failure is instructive.
  *
  * First it probed `tiers = <tier>` and `categoryIds = <category>`. An empty eligibility
  * array means "no restriction on this dimension", and an index cannot match an empty array —
@@ -217,12 +217,20 @@ export class quote extends Resource {
  * Then it scanned the whole table, which is correct and does not scale: `bench` carries 5,000
  * promotions and that scan ran on every quote.
  *
- * Now the rows carry `tierKeys` / `categoryKeys` — the same values, or `['*']` when
- * unrestricted — so "applies to everything" is an indexable value like any other. One `in`
- * probe per dimension covers both cases, and the two conditions AND to a superset of the
- * eligible set. `isEligible` still applies the authoritative arrays, including `skus`, which
- * is not indexed because a SKU-restricted promotion is still reachable through its other two
- * dimensions.
+ * Then the rows carried `tierKeys` / `categoryKeys` — the same values, or `['*']` when
+ * unrestricted — probed with one `in` per dimension and ANDed. Correct, and on `bench` still
+ * about as slow as the scan: Harper 5.3.2 answers `in` by walking the attribute's whole index
+ * and yielding to the event loop once per entry, then reads every row the first condition
+ * matches to test the second. A gold-tier cart in three categories walked 5,000 entries and
+ * read about 1,480 rows to keep 619; on `dev` carts with the `bench` promotions that was 13 of
+ * a quote's 14 ms of reads.
+ *
+ * Now each row carries one `eligibilityKeys` entry per (tier key, category key) pair — the
+ * AND of the two dimensions, computed by the schema and indexed — and the cart asks for the
+ * pairs it can match. Each is an exact equality probe, a bounded index range, and their union
+ * is the same candidate set without reading a row the AND would discard. `isEligible` still
+ * applies the authoritative arrays, including `skus`, which is not indexed because a
+ * SKU-restricted promotion is still reachable through its other two dimensions.
  *
  * The result is a SUPERSET, never a subset — that is the property that matters, and
  * `scripts/verify-promotion-index.mjs` checks it against a full scan.
@@ -230,14 +238,12 @@ export class quote extends Resource {
 async function collectPromotions(tier, categoryIds) {
 	const rows = [];
 	for await (const row of Promotion.search({
-		conditions: [
-			{ attribute: 'tierKeys', comparator: 'in', value: [tier, UNRESTRICTED] },
-			{ attribute: 'categoryKeys', comparator: 'in', value: [...categoryIds, UNRESTRICTED] },
-		],
+		operator: 'or',
+		conditions: probeKeys(tier, categoryIds).map((value) => ({ attribute: 'eligibilityKeys', value })),
 	})) {
 		rows.push(row);
 	}
-	// Sorted: the scan order of two ANDed index probes is not guaranteed, and evaluation
-	// order feeds the normative promotion order (QUOTE-008).
+	// Sorted: the order of a union of index probes is not guaranteed, and evaluation order
+	// feeds the normative promotion order (QUOTE-008).
 	return rows.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 }

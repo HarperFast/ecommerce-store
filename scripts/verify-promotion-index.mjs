@@ -1,21 +1,26 @@
 /**
  * Assert that the indexed promotion probe returns a SUPERSET of the eligible set.
  *
- * The lookup in resources/quote.js narrows 5,000 promotions to a candidate set with two
- * indexed `in` probes. If that narrowing can ever EXCLUDE an eligible promotion, quotes are
- * silently cheaper and silently wrong — which is exactly what happened the first time this
- * was indexed, when a promotion unrestricted on both tier and category became unreachable.
+ * The lookup in resources/quote.js narrows 5,000 promotions to a candidate set by probing
+ * `eligibilityKeys`, an index the schema computes. If that narrowing can ever EXCLUDE an
+ * eligible promotion, quotes are silently cheaper and silently wrong — which is exactly what
+ * happened the first time this was indexed, when a promotion unrestricted on both tier and
+ * category became unreachable.
+ *
+ * The keys each row is indexed under come from the schema's own `@computed` expression,
+ * evaluated here on every row, and the keys a quote asks for come from the quote's own
+ * builder, so the check also fails if the two ever disagree.
  *
  * Runs offline against the committed dataset: it is a property of the data and the
  * predicate, so it needs no server and can run in CI.
  *
  *   node scripts/verify-promotion-index.mjs [--scale dev]
  */
-import { createReadStream } from 'node:fs';
+import { createReadStream, readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { join, resolve } from 'node:path';
 import { isEligible } from '../resources/lib/pricing.js';
-import { UNRESTRICTED } from '@ecommerce-store/spec';
+import { probeKeys } from '../resources/lib/promotion-index.js';
 
 const args = process.argv.slice(2);
 const argOf = (name, fallback) => {
@@ -32,13 +37,20 @@ for await (const line of createInterface({ input: createReadStream(join(dir, 'pr
 	if (line) promotions.push(JSON.parse(line));
 }
 
-/** The same narrowing the indexed probe performs: tierKeys IN (...) AND categoryKeys IN (...). */
+// Harper evaluates a `@computed(from:)` expression with the record's attributes in scope.
+const schema = readFileSync(join(import.meta.dirname, '..', 'schemas', 'store.graphql'), 'utf8');
+const expression = /^\s*eligibilityKeys:.*@computed\(from: "([^"]+)"\)/m.exec(schema)?.[1];
+if (!expression) {
+	console.error('FAIL — no @computed(from:) expression for Promotion.eligibilityKeys in schemas/store.graphql');
+	process.exit(1);
+}
+const indexedKeys = new Function('record', `with (record) { return ${expression}; }`);
+const keysByPromotion = new Map(promotions.map((p) => [p.id, new Set(indexedKeys(p))]));
+
+/** The same narrowing the indexed probe performs: any of the cart's probe keys among the row's indexed keys. */
 const probe = (tier, categoryIds) => {
-	const tierWanted = new Set([tier, UNRESTRICTED]);
-	const catWanted = new Set([...categoryIds, UNRESTRICTED]);
-	return promotions.filter(
-		(p) => p.tierKeys.some((k) => tierWanted.has(k)) && p.categoryKeys.some((k) => catWanted.has(k))
-	);
+	const wanted = probeKeys(tier, categoryIds);
+	return promotions.filter((p) => wanted.some((key) => keysByPromotion.get(p.id).has(key)));
 };
 
 const TIERS = ['standard', 'silver', 'gold', 'platinum'];

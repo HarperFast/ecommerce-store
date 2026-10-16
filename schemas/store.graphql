@@ -76,8 +76,14 @@ type Promotion @table @export @sealed {
 	# The indexable form: the same values, or ['*'] when unrestricted. An index cannot match
 	# an empty array, so without the sentinel a probe can never return a promotion that
 	# applies to everything — which is how the first indexed lookup lost 14% of the corpus.
-	tierKeys: [String] @indexed
-	categoryKeys: [String] @indexed
+	tierKeys: [String]
+	categoryKeys: [String]
+	# One entry per (tier key, category key) pair: the AND of the two dimensions, so the quote's
+	# candidate lookup is a union of equality probes rather than two indexes intersected by
+	# reading rows. Derived here, not loaded, so the pinned dataset is unchanged. The expression
+	# must build the keys `eligibilityKey` in resources/lib/promotion-index.js does;
+	# scripts/verify-promotion-index.mjs evaluates it against the dataset to check.
+	eligibilityKeys: [String] @computed(from: "tierKeys.flatMap((tierKey) => categoryKeys.map((categoryKey) => tierKey + '|' + categoryKey))") @indexed
 	thresholdMinor: Int
 	amountMinor: Int
 	amountBasisPoints: Int
