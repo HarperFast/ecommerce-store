@@ -15,7 +15,7 @@
  * response that passed every conformance assertion.
  */
 
-/** Tier multipliers in basis points. Fixed, not drawn — must match packages/seed. */
+/** Tier multipliers in basis points, from SPEC.md#resolved-unit-price; scripts/check-tier-multipliers.mjs checks the copies agree. */
 const TIER_BASIS_POINTS = { standard: 10000, silver: 9500, gold: 9000, platinum: 8500 };
 
 /** Round half-up to the minor unit. Applied per discount, not once at the end — SPEC.md#promotion-evaluation-order. */

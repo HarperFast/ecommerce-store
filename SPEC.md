@@ -1,6 +1,6 @@
 # Ecommerce Store — Application Specification
 
-**Spec version:** `0.2.0-draft` · **Status:** P0 draft · **Last updated:** 2026-10-14 (access distribution stated; requirements unchanged)
+**Spec version:** `0.3.0-draft` · **Status:** P0 draft · **Last updated:** 2026-10-16 (promotions read per quote from a defined candidate set, `CACHE-002` scoped to the write surface, snapshot reads not required, `WRITE-005` durability added)
 
 Scope, methodology, and the rules governing how results may be described are defined by [Harper Application Architecture Benchmarks](https://github.com/HarperFast/application-architecture-benchmarks). That document is binding. This one defines only the application.
 
@@ -57,13 +57,19 @@ Three choices keep the model to eight tables:
 
 `DATA-001` **MUST** — An implementation uses exactly these eight logical entities **as its source of truth**. A stack MAY represent them differently where its idiom demands (a normalized schema may split embedded line items into their own relation), and MUST then document the mapping. What it MUST NOT do is pre-join or denormalize its *source of truth* into a shape that removes a read the specification requires — that is the measurement, not an optimization.
 
-**Derived caches are permitted and expected.** Deleting them changes latency, not responses. Their coherence cost is measured through [background writes](#background-writes).
+**Derived caches are permitted and expected,** except for promotions, which every quote reads from the source of truth ([workload rule](#promotions-are-read-per-quote)). Deleting a cache changes latency, not responses. Its coherence cost is measured through [background writes](#background-writes).
 
 ### Caching
 
 - `CACHE-001` **MUST** — Caches are **derived**. Dropping every cache changes no response body, only latency. No cached value is authoritative, and nothing is served from a cache that could not be recomputed from the eight entities.
-- `CACHE-002` **MUST** — Every cached value is bounded by `FRESH_MS` (Background writes) — by explicit invalidation on write, by expiry, or both. An implementation states which mechanism it relies on.
+- `CACHE-002` **MUST** — Every cached value that a write through the write surface (`WRITE-001`) can change is bounded by `FRESH_MS` (Background writes) after that write — by explicit invalidation on write, by expiry, or both. An implementation states which mechanism it relies on.
 - `CACHE-003` **MUST** — A cache key includes every dimension the cached value varies by. Serving a value keyed on fewer dimensions than it varies by is a correctness failure, not a cache tuning choice.
+
+**What `CACHE-002` bounds.** The write surface changes variant prices and inventory quantities, and it is the only writer during a run, since the dataset is restored before every trial. So `CACHE-002` bounds whatever those two writes can change, such as a product aggregate or a cached variant or inventory row, and nothing else:
+
+- **Values no write-surface write can change need no bound.** These are the rows of `cart`, `customer`, `product`, `location` and `rate`, and anything derived only from them.
+- **Lookup-table memos need no expiry.** `location` and `rate` have no write surface, so the 500 ms bound implementations have given their memos is no longer required. An implementation states any bound it keeps.
+- **A write made any other way is outside `CACHE-002`.** That covers an operations API, a REST export of a table and a direct SQL statement. Such a write is also outside the measured workload.
 
 ### Rate table invariants
 
@@ -100,7 +106,7 @@ The write-shaped read path, and the primary endpoint under test. Prices a cart.
 1. Read the cart.
 2. Per line: product and variant.
 3. Per line: inventory across fulfillment locations; and the customer's tier and loyalty balance.
-4. Eligible promotions by tier, SKU, and category — evaluation of which triggers further reads.
+4. Eligible promotions by tier, SKU, and category, read from the source of truth on every quote ([below](#promotions-are-read-per-quote)) — evaluation of which triggers further reads.
 5. Shipping rate by region and total weight; tax by jurisdiction.
 
 - `QUOTE-001` **MUST** — Every response is unique to its cart. No implementation may serve a stored response for the endpoint. Entity caches are expected and do their normal job; **response-level caching is a conformance failure**, not an optimisation.
@@ -117,8 +123,26 @@ The write-shaped read path, and the primary endpoint under test. Prices a cart.
 - `QUOTE-006` **MUST** — Shipping is resolved by the customer's region and the cart's total weight, where total weight is `Σ (variant.weight × quantity)` over the merged lines, against the band contract in Data model. Shipping is **not** discounted and **not** taxed.
 - `QUOTE-007` **MUST** — Tax is resolved by the customer's jurisdiction and applied to the post-discount subtotal.
 - `QUOTE-008` **MUST** — The quote is **deterministic**: the same cart against the same dataset state produces a byte-identical response. Determinism enables verification but does not prove correctness; the harness also needs independently computed expected values.
+
+  **A quote need not read one snapshot.** `QUOTE-008` holds the dataset state fixed. While writes are in flight, a quote may combine rows read at different moments, for example a cached variant from before a write and inventory from after it, provided each value meets `WRITE-002`. An implementation that reads every row of a quote from one snapshot gives a stronger guarantee than this document requires. Disclose that as an advantage of that implementation; it does not make a comparison invalid.
+
 - `QUOTE-009` **MUST** — An unknown cart id returns `404`.
 - `QUOTE-010` **MUST** — The response itemizes per line: resolved unit price, quantity, applied promotions, line total, and `shortfall` (zero when the line is fully available); and at cart level: subtotal, discount total, shipping, tax, and grand total. `grandTotal` equals `subtotal - discountTotal + shipping + tax`.
+
+### Promotions are read per quote
+
+Wave 4 is part of the measured fan-out. **Every quote reads its candidate set from the source of truth**, through that datastore's own query path and indexes. For a customer of tier `t`, a cart whose lines name the SKUs `S`, and products naming the categories `C`, the candidate set is:
+
+- every promotion **open to every SKU** (empty `skus`) whose `tiers` is empty or contains `t`, and whose `categoryIds` is empty or shares a member with `C`; and
+- every promotion whose **`skus` share a member with `S`**, whatever its tiers and categories.
+
+Every promotion eligible for some line is in this set. Application code then decides each line's eligibility on all three dimensions ([step 1](#promotion-evaluation-order)). A lookup that returns exactly this set does the work the workload defines. A lookup that returns more pays for the extra rows itself, and the review records it. A lookup that returns less can miss an eligible promotion.
+
+An implementation keeps no promotion cache, no cache of candidate sets and no in-memory promotion index, whether per process or in a separate cache tier. The datastore's own buffer pool or record cache is part of the datastore and is not a promotion cache.
+
+Holding the promotion table in application memory would turn the lookup into a dictionary probe on any stack. This rule keeps the lookup in the measured path on every stack.
+
+This is a workload rule, not a numbered requirement: no request can observe it, so the implementation review checks it ([Conformance](#conformance)).
 
 ### Resolved unit price
 
@@ -145,7 +169,7 @@ This order is normative because stacking is order-dependent.
 
 `exclusive` and `threshold` are cart-wide; `bogo` and `stackable` act on lines. Evaluate as follows:
 
-1. Candidate promotions are collected by tier, SKU, and category. **A promotion unrestricted on a dimension (an empty array) is eligible on that dimension**, so a promotion unrestricted on every dimension is eligible for every line — collection must return it.
+1. Candidate promotions are collected by tier, SKU, and category, as the [candidate set](#promotions-are-read-per-quote) defines. **A promotion unrestricted on a dimension (an empty array) is eligible on that dimension**, so a promotion unrestricted on every dimension is eligible for every line — collection must return it.
 2. **Exclusive** — cart-wide, evaluated against the subtotal. The highest-value one wins; if one applies, **no other promotion applies at all**. Attributed to every line it was eligible for.
 3. Otherwise **threshold** — cart-wide, each eligible promotion applied **once**, against the **pre-discount** subtotal, if the subtotal meets its threshold. Attributed to every line it was eligible for.
 4. Then **BOGO** — each eligible promotion applied **once**, to the single lowest-priced qualifying unit among the lines it is eligible for, where a qualifying line has quantity ≥ 2 and a non-zero remaining amount. Ties break on ascending SKU, so the result does not depend on cart line order.
@@ -191,6 +215,9 @@ The stream exercises cache coherence; its latency is not a headline metric. A re
 - `WRITE-002` **MUST** — A committed write is observable on the product aggregate (GET /product/:id) within `FRESH_MS`, and in quote pricing (POST /cart/:id/quote) within `FRESH_MS`.
 - `WRITE-003` **MUST** — No implementation may satisfy `WRITE-002` by disabling caching. Measured cache-hit rates are recorded with every run precisely so that this is visible.
 - `WRITE-004` **MUST** — The write stream is identical in rate and key distribution for every target. It is not a per-target tuning budget.
+- `WRITE-005` **MUST** — A write the write surface acknowledges is **synced to stable storage in the source of truth before it is acknowledged**, so it survives an operating-system crash or a power loss, not only a process crash. Concurrent writes may share one sync (group commit). Caches may be volatile: losing one costs latency, never an acknowledged write (`CACHE-001`).
+
+  Without this, one stack could skip a sync per write that another pays, and equal write throughput would compare unequal guarantees.
 
 ### `FRESH_MS`
 
@@ -216,7 +243,7 @@ An implementation publishes a conformance report: every requirement id, and pass
 
 The shared verification suite implements this document. Each test names the requirement ids it covers. `npm run check` enforces declared coverage for every MUST; it does not guarantee execution of every check. Known execution and assertion gaps are tracked in [the plan](docs/plan.md#open).
 
-Passing conformance is **necessary but not sufficient**. An implementation must also use its stack well; that is a review judgment, and the benchmarks repo defines how it is made.
+Passing conformance is **necessary but not sufficient**. An implementation must also use its stack well; that is a review judgment, and the benchmarks repo defines how it is made. The same review checks the workload rules that carry no id because no request can observe them: [promotions are read per quote](#promotions-are-read-per-quote).
 
 This document is versioned and snapshotted with each comparison. A published comparison names the exact spec version it ran against.
 
@@ -231,3 +258,5 @@ P0 does not complete until this document passes: self-review → cross-model rev
 | Human review | ☐ |
 
 **Known open:** the provisional `FRESH_MS` budget, the eight-table foldings, and review of the invented promotion order by someone with pricing-engine experience.
+
+**Known open against the reference: `WRITE-005`.** Harper 5.3.2 on RocksDB acknowledges a commit without syncing it ([HarperFast/harper#3243](https://github.com/HarperFast/harper/issues/3243)): under `strace`, each acknowledged write was one `writev` to the transaction log and no `fsync`, `fdatasync` or `sync_file_range`. No setting changes that, so the reference fails `WRITE-005` until the engine is fixed; CI runs [verify-durability.mjs](scripts/verify-durability.mjs) against it as a non-blocking step until then. The requirement stands. Decided 2026-10-16: until then, the reference stays in comparisons as an exception to the rule that a failing MUST disqualifies. Each comparison reports the failure and discloses the skipped sync per write as an advantage of the reference.

@@ -7,7 +7,11 @@
 
 export const TIERS = ['standard', 'silver', 'gold', 'platinum'] as const;
 
-/** Tier price multipliers in basis points, applied to basePrice. Deterministic, not drawn. */
+/**
+ * Tier price multipliers in basis points, applied to basePrice. Deterministic, not drawn.
+ * Normative in SPEC.md#resolved-unit-price; scripts/check-tier-multipliers.mjs keeps this copy
+ * and the pricing engine's in step with it.
+ */
 export const TIER_BASIS_POINTS: Record<string, number> = {
 	standard: 10000,
 	silver: 9500,
