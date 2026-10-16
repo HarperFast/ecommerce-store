@@ -67,8 +67,7 @@ services:
       # containers/.env — local test credentials for a container that only ever gets
       # benchmarked, reachable only on this compose bridge.
       ROOTPATH: /data/harper
-      # Diagnostics only: per-wave Server-Timing entries (resources/lib/timing.js). Off unless
-      # set to 1; run-benchmark.sh refuses measured trials with it on.
+      # Diagnostics only; see containers/README.md.
       SERVER_TIMING_WAVES: ${SERVER_TIMING_WAVES:-}
       HDB_ADMIN_USERNAME: ${HDB_ADMIN_USERNAME:-benchadmin}
       HDB_ADMIN_PASSWORD: ${HDB_ADMIN_PASSWORD:?set in containers/.env}

@@ -14,7 +14,7 @@
 import { RequestTarget, Resource, tables } from 'harper';
 import { lookupTable } from './lib/lookup.js';
 import { resolveUnitPrice } from './lib/pricing.js';
-import { wave, waveEntries, waveRecorder } from './lib/timing.js';
+import { countNestedReads, countReads, countRows, record, settled, waveEntries, waveRecorder, waveStart } from './lib/timing.js';
 
 const { Product, Variant, Inventory, Location, ProductView } = tables;
 
@@ -66,23 +66,17 @@ async function assemble(productId, tier, region, context) {
 		}
 	};
 
-	const row = await timed(() => wave(waves, 'product', () => Product.get(productId, context)));
+	const row = await timed(() => settled(waves, 'product', waveStart(waves), Product.get(productId, context)));
 	if (!row) return null;
 
 	const [locations, variants] = await timed(async () => {
-		const found = await wave(
-			waves,
-			'variants',
-			async () => {
-				const found = [];
-				for await (const variant of Variant.search({ conditions: [{ attribute: 'productId', value: productId }] }, context)) {
-					found.push(variant);
-				}
-				return found;
-			},
-			(found) => `rows=${found.length}`
-		);
-		return [await wave(waves, 'lookups', () => loadLocations()), found];
+		const variantsStarted = waveStart(waves);
+		const found = [];
+		for await (const variant of Variant.search({ conditions: [{ attribute: 'productId', value: productId }] }, context)) {
+			found.push(variant);
+		}
+		record(waves, 'variants', variantsStarted, found, countRows);
+		return [await settled(waves, 'lookups', waveStart(waves), loadLocations()), found];
 	});
 	// Sorted: Harper's scan order is not guaranteed, and an unordered variant array would make
 	// two identical requests return different bytes from the same data.
@@ -94,13 +88,14 @@ async function assemble(productId, tier, region, context) {
 	// depend on inventory, and awaiting inventory first serialized two independent waves.
 	const [inventory, related] = await timed(() =>
 		Promise.all([
-			wave(
+			settled(
 				waves,
 				'inventory',
-				() => Promise.all(variants.map((variant) => Promise.all(locationIds.map((id) => Inventory.get(`${variant.sku}:${id}`, context))))),
-				() => `reads=${variants.length * locationIds.length}`
+				waveStart(waves),
+				Promise.all(variants.map((variant) => Promise.all(locationIds.map((id) => Inventory.get(`${variant.sku}:${id}`, context))))),
+				countNestedReads
 			),
-			wave(waves, 'related', () => Promise.all((row.relatedProductIds ?? []).map((id) => Product.get(id, context))), (related) => `reads=${related.length}`),
+			settled(waves, 'related', waveStart(waves), Promise.all((row.relatedProductIds ?? []).map((id) => Product.get(id, context))), countReads),
 		])
 	);
 
@@ -144,7 +139,7 @@ ProductView.sourcedFrom({
 		// own context; `requestContext` is the request that triggered it.
 		if (sourceContext?.requestContext) {
 			sourceContext.requestContext.productAssemblyComputeNs = assembled.computeNs;
-			sourceContext.requestContext.productAssemblyWaves = assembled.waves;
+			if (assembled.waves) sourceContext.requestContext.productAssemblyWaves = assembled.waves;
 		}
 		return { id, productId, tier, region, payload: assembled.payload };
 	},

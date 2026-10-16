@@ -12,7 +12,7 @@
 import { Resource, tables } from 'harper';
 import { lookupTable } from './lib/lookup.js';
 import { probeKeys } from './lib/promotion-index.js';
-import { wave, waveEntries, waveRecorder } from './lib/timing.js';
+import { countCandidates, countNestedReads, countReads, settled, waveEntries, waveRecorder, waveStart } from './lib/timing.js';
 import { evaluatePromotions, isEligible, resolveShipping, resolveTax, resolveUnitPrice } from './lib/pricing.js';
 
 const { Cart, Customer, Product, Variant, Inventory, Location, Promotion, Rate } = tables;
@@ -59,7 +59,7 @@ export class quote extends Resource {
 		const cartId = target.id ?? this.id;
 
 		// --- wave 1: the cart -------------------------------------------------------------
-		const cart = await timed(() => wave(waves, 'cart', () => Cart.get(cartId)));
+		const cart = await timed(() => settled(waves, 'cart', waveStart(waves), Cart.get(cartId)));
 		if (!cart) {
 			const error = new Error('cart not found');
 			error.statusCode = 404;
@@ -78,37 +78,32 @@ export class quote extends Resource {
 		// runs beside it. Reads in a wave that fail are checked below in the original order.
 		const skus = [...new Set(cart.lines.map((line) => line.sku))];
 		const [{ locations, rates }, customer, variantBySku, productById, inventoryBySku, candidateRows] = await timed(() => {
-			const statics = wave(waves, 'lookups', () => loadStatic());
-			const customerRead = wave(waves, 'customer', () => Customer.get(cart.customerId));
-			const variantsRead = wave(waves, 'variants', () => Promise.all(skus.map((sku) => Variant.get(sku))), (variants) => `reads=${variants.length}`).then(
+			const statics = settled(waves, 'lookups', waveStart(waves), loadStatic());
+			const customerRead = settled(waves, 'customer', waveStart(waves), Customer.get(cart.customerId));
+			const variantsRead = settled(waves, 'variants', waveStart(waves), Promise.all(skus.map((sku) => Variant.get(sku))), countReads).then(
 				(variants) => new Map(skus.map((sku, i) => [sku, variants[i]]))
 			);
 			const inventoryRead = Promise.all([customerRead, statics]).then(([customer, { locations }]) => {
 				if (!customer) return null;
 				const regionLocations = locations.filter((l) => l.region === customer.region);
-				return wave(
+				return settled(
 					waves,
 					'inventory',
-					() => Promise.all(skus.map((sku) => Promise.all(regionLocations.map((l) => Inventory.get(`${sku}:${l.id}`))))),
-					() => `reads=${skus.length * regionLocations.length}`
+					waveStart(waves),
+					Promise.all(skus.map((sku) => Promise.all(regionLocations.map((l) => Inventory.get(`${sku}:${l.id}`))))),
+					countNestedReads
 				).then((rows) => new Map(skus.map((sku, i) => [sku, rows[i]])));
 			});
 			const productsRead = variantsRead.then((variantBySku) => {
 				const productIds = [...new Set([...variantBySku.values()].filter(Boolean).map((variant) => variant.productId))];
-				return wave(waves, 'products', () => Promise.all(productIds.map((id) => Product.get(id))), (products) => `reads=${products.length}`).then(
+				return settled(waves, 'products', waveStart(waves), Promise.all(productIds.map((id) => Product.get(id))), countReads).then(
 					(products) => new Map(productIds.map((id, i) => [id, products[i]]))
 				);
 			});
 			const promotionsRead = Promise.all([customerRead, productsRead]).then(([customer, productById]) => {
 				if (!customer) return null;
 				const categoryIds = [...new Set([...productById.values()].filter(Boolean).flatMap((product) => product.categoryIds ?? []))];
-				return wave(
-					waves,
-					'promotions',
-					() => collectPromotions(customer.tier, categoryIds),
-					// With the combined key every row read is a candidate, so candidates are also rows examined.
-					(rows) => `probes=${probeKeys(customer.tier, categoryIds).length} candidates=${rows.length}`
-				);
+				return settled(waves, 'promotions', waveStart(waves), collectPromotions(customer.tier, categoryIds), countCandidates);
 			});
 			return Promise.all([statics, customerRead, variantsRead, productsRead, inventoryRead, promotionsRead]);
 		});
