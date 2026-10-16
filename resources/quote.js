@@ -12,6 +12,7 @@
 import { Resource, tables } from 'harper';
 import { lookupTable } from './lib/lookup.js';
 import { probeKeys } from './lib/promotion-index.js';
+import { wave, waveEntries, waveRecorder } from './lib/timing.js';
 import { evaluatePromotions, isEligible, resolveShipping, resolveTax, resolveUnitPrice } from './lib/pricing.js';
 
 const { Cart, Customer, Product, Variant, Inventory, Location, Promotion, Rate } = tables;
@@ -53,11 +54,12 @@ export class quote extends Resource {
 				dataNs += process.hrtime.bigint() - t0;
 			}
 		};
+		const waves = waveRecorder();
 		const target = this.getId ? { id: this.getId() } : this;
 		const cartId = target.id ?? this.id;
 
 		// --- wave 1: the cart -------------------------------------------------------------
-		const cart = await timed(() => Cart.get(cartId));
+		const cart = await timed(() => wave(waves, 'cart', () => Cart.get(cartId)));
 		if (!cart) {
 			const error = new Error('cart not found');
 			error.statusCode = 404;
@@ -76,28 +78,37 @@ export class quote extends Resource {
 		// runs beside it. Reads in a wave that fail are checked below in the original order.
 		const skus = [...new Set(cart.lines.map((line) => line.sku))];
 		const [{ locations, rates }, customer, variantBySku, productById, inventoryBySku, candidateRows] = await timed(() => {
-			const statics = loadStatic();
-			const customerRead = Customer.get(cart.customerId);
-			const variantsRead = Promise.all(skus.map((sku) => Variant.get(sku))).then(
+			const statics = wave(waves, 'lookups', () => loadStatic());
+			const customerRead = wave(waves, 'customer', () => Customer.get(cart.customerId));
+			const variantsRead = wave(waves, 'variants', () => Promise.all(skus.map((sku) => Variant.get(sku))), (variants) => `reads=${variants.length}`).then(
 				(variants) => new Map(skus.map((sku, i) => [sku, variants[i]]))
 			);
 			const inventoryRead = Promise.all([customerRead, statics]).then(([customer, { locations }]) => {
 				if (!customer) return null;
 				const regionLocations = locations.filter((l) => l.region === customer.region);
-				return Promise.all(
-					skus.map((sku) => Promise.all(regionLocations.map((l) => Inventory.get(`${sku}:${l.id}`))))
+				return wave(
+					waves,
+					'inventory',
+					() => Promise.all(skus.map((sku) => Promise.all(regionLocations.map((l) => Inventory.get(`${sku}:${l.id}`))))),
+					() => `reads=${skus.length * regionLocations.length}`
 				).then((rows) => new Map(skus.map((sku, i) => [sku, rows[i]])));
 			});
 			const productsRead = variantsRead.then((variantBySku) => {
 				const productIds = [...new Set([...variantBySku.values()].filter(Boolean).map((variant) => variant.productId))];
-				return Promise.all(productIds.map((id) => Product.get(id))).then(
+				return wave(waves, 'products', () => Promise.all(productIds.map((id) => Product.get(id))), (products) => `reads=${products.length}`).then(
 					(products) => new Map(productIds.map((id, i) => [id, products[i]]))
 				);
 			});
 			const promotionsRead = Promise.all([customerRead, productsRead]).then(([customer, productById]) => {
 				if (!customer) return null;
 				const categoryIds = [...new Set([...productById.values()].filter(Boolean).flatMap((product) => product.categoryIds ?? []))];
-				return collectPromotions(customer.tier, categoryIds);
+				return wave(
+					waves,
+					'promotions',
+					() => collectPromotions(customer.tier, categoryIds),
+					// With the combined key every row read is a candidate, so candidates are also rows examined.
+					(rows) => `probes=${probeKeys(customer.tier, categoryIds).length} candidates=${rows.length}`
+				);
 			});
 			return Promise.all([statics, customerRead, variantsRead, productsRead, inventoryRead, promotionsRead]);
 		});
@@ -170,7 +181,7 @@ export class quote extends Resource {
 			// The quote is deliberately not response-cacheable (QUOTE-001), so its cache status
 			// is always `miss` — stated rather than omitted, so a run record can tell "not
 			// cached" apart from "not instrumented".
-			`cache;desc=miss, data;dur=${dataMs.toFixed(2)}, compute;dur=${Math.max(0, totalMs - dataMs).toFixed(2)}, total;dur=${totalMs.toFixed(2)}`
+			`cache;desc=miss, data;dur=${dataMs.toFixed(2)}, compute;dur=${Math.max(0, totalMs - dataMs).toFixed(2)}, total;dur=${totalMs.toFixed(2)}${waveEntries(waves)}`
 		);
 
 		return {
