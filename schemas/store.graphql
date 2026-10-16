@@ -78,12 +78,12 @@ type Promotion @table @export @sealed {
 	# applies to everything — which is how the first indexed lookup lost 14% of the corpus.
 	tierKeys: [String]
 	categoryKeys: [String]
-	# One entry per (tier key, category key) pair: the AND of the two dimensions, so the quote's
-	# candidate lookup is a union of equality probes rather than two indexes intersected by
-	# reading rows. Derived here, not loaded, so the pinned dataset is unchanged. The expression
-	# must build the keys `eligibilityKey` in resources/lib/promotion-index.js does;
-	# scripts/verify-promotion-index.mjs evaluates it against the dataset to check.
-	eligibilityKeys: [String] @computed(from: "tierKeys.flatMap((tierKey) => categoryKeys.map((categoryKey) => tierKey + '|' + categoryKey))") @indexed
+	# One entry per (tier key, category key) pair, so the quote's lookup is a union of equality
+	# probes (docs/data-model.md#promotion-eligibility-index). Missing or empty keys index as
+	# unrestricted: the index must stay a superset, and a throw here would fail the write or
+	# leave the index rebuilding. Must build the keys resources/lib/promotion-index.js probes
+	# for; scripts/verify-promotion-index.mjs checks they agree.
+	eligibilityKeys: [String] @computed(from: "(tierKeys?.length ? tierKeys : ['*']).flatMap((tierKey) => (categoryKeys?.length ? categoryKeys : ['*']).map((categoryKey) => tierKey + '|' + categoryKey))") @indexed
 	thresholdMinor: Int
 	amountMinor: Int
 	amountBasisPoints: Int

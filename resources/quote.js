@@ -219,11 +219,9 @@ export class quote extends Resource {
  *
  * Then the rows carried `tierKeys` / `categoryKeys` — the same values, or `['*']` when
  * unrestricted — probed with one `in` per dimension and ANDed. Correct, and on `bench` still
- * about as slow as the scan: Harper 5.3.2 answers `in` by walking the attribute's whole index
- * and yielding to the event loop once per entry, then reads every row the first condition
- * matches to test the second. A gold-tier cart in three categories walked 5,000 entries and
- * read about 1,480 rows to keep 619; on `dev` carts with the `bench` promotions that was 13 of
- * a quote's 14 ms of reads.
+ * about as slow as the scan: Harper 5.3.2 answers `in` by walking the attribute's whole index,
+ * then reads every row the first condition matches to test the second
+ * (docs/data-model.md#promotion-eligibility-index).
  *
  * Now each row carries one `eligibilityKeys` entry per (tier key, category key) pair — the
  * AND of the two dimensions, computed by the schema and indexed — and the cart asks for the

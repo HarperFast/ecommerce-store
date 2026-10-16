@@ -7,9 +7,9 @@
  * happened the first time this was indexed, when a promotion unrestricted on both tier and
  * category became unreachable.
  *
- * The keys each row is indexed under come from the schema's own `@computed` expression,
- * evaluated here on every row, and the keys a quote asks for come from the quote's own
- * builder, so the check also fails if the two ever disagree.
+ * The keys each row is indexed under come from the schema's own `@computed` expression, and
+ * the keys a quote asks for from the quote's own builder, so the check also fails if the two
+ * disagree. Rows with missing or empty keys must stay reachable too.
  *
  * Runs offline against the committed dataset: it is a property of the data and the
  * predicate, so it needs no server and can run in CI.
@@ -37,21 +37,28 @@ for await (const line of createInterface({ input: createReadStream(join(dir, 'pr
 	if (line) promotions.push(JSON.parse(line));
 }
 
-// Harper evaluates a `@computed(from:)` expression with the record's attributes in scope.
 const schema = readFileSync(join(import.meta.dirname, '..', 'schemas', 'store.graphql'), 'utf8');
-const expression = /^\s*eligibilityKeys:.*@computed\(from: "([^"]+)"\)/m.exec(schema)?.[1];
+const promotionType = /^type Promotion\b[^{]*\{([^}]*)\}/m.exec(schema)?.[1] ?? '';
+const expression = /^\s*eligibilityKeys:.*@computed\(from: "([^"]+)"\)/m.exec(promotionType)?.[1];
 if (!expression) {
 	console.error('FAIL — no @computed(from:) expression for Promotion.eligibilityKeys in schemas/store.graphql');
 	process.exit(1);
 }
-const indexedKeys = new Function('record', `with (record) { return ${expression}; }`);
-const keysByPromotion = new Map(promotions.map((p) => [p.id, new Set(indexedKeys(p))]));
+// The scope Harper compiles it in (resources/graphql.ts): every declared attribute, undefined
+// unless the record has it.
+const declared = Object.fromEntries([...promotionType.matchAll(/^\s*(\w+):/gm)].map(([, name]) => [name, undefined]));
+const indexedKeys = new Function('attributes', 'record', `with (attributes) { with (record) { return ${expression}; } }`);
+const keysOf = (promotion) => new Set(indexedKeys(declared, promotion));
+const keysByPromotion = new Map(promotions.map((p) => [p.id, keysOf(p)]));
 
 /** The same narrowing the indexed probe performs: any of the cart's probe keys among the row's indexed keys. */
 const probe = (tier, categoryIds) => {
 	const wanted = probeKeys(tier, categoryIds);
 	return promotions.filter((p) => wanted.some((key) => keysByPromotion.get(p.id).has(key)));
 };
+
+// A row whose key arrays are missing or empty is unrestricted as far as the index can tell.
+const keyless = [{}, { tierKeys: null, categoryKeys: null }, { tierKeys: [], categoryKeys: [] }, { tierKeys: ['gold'] }, { categoryKeys: ['apparel'] }];
 
 const TIERS = ['standard', 'silver', 'gold', 'platinum'];
 const CATEGORIES = [...new Set(promotions.flatMap((p) => p.categoryIds))].filter(Boolean);
@@ -72,6 +79,16 @@ const categorySets = [
 for (const tier of TIERS) {
 	for (const categoryIds of categorySets) {
 		checks++;
+		const wanted = probeKeys(tier, categoryIds);
+		for (const row of keyless) {
+			const keys = keysOf(row);
+			const reachable = (row.tierKeys?.length && !row.tierKeys.includes(tier)) || (row.categoryKeys?.length && !row.categoryKeys.some((c) => categoryIds.includes(c)))
+				|| wanted.some((key) => keys.has(key));
+			if (!reachable) {
+				missed++;
+				if (examples.length < 5) examples.push({ tier, categoryIds, row });
+			}
+		}
 		const candidates = probe(tier, categoryIds);
 		candidateTotal += candidates.length;
 		const candidateIds = new Set(candidates.map((p) => p.id));
