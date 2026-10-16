@@ -164,7 +164,8 @@ jobs:
       - name: Cache coherence under concurrency
         run: node scripts/verify-coherence.mjs --url http://localhost:9926 --seconds 10
 
-      # WRITE-005: each of 50 sequential writes must be synced before it is acknowledged.
+      # WRITE-005: each of 50 sequential writes must make the commit log durable before it is
+      # acknowledged.
       # Known open against the reference: Harper 5.3.2 on RocksDB never syncs a commit
       # (HarperFast/harper#3243), so this step fails until the engine is fixed. It runs anyway,
       # so the gap stays visible and the checker keeps running on Linux.
@@ -173,7 +174,7 @@ jobs:
         run: |
           command -v strace >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq strace; }
           sudo sysctl -w kernel.yama.ptrace_scope=0
-          node scripts/verify-durability.mjs --url http://localhost:9926 --pid "$(pgrep -o -f 'harper run')"
+          node scripts/verify-durability.mjs --url http://localhost:9926 --pid "$(pgrep -o -f 'harper run')" --log /transaction_logs/
 
       - name: Harper log
         if: failure()
