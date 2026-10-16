@@ -31,8 +31,9 @@ The header of [run-benchmark.sh](run-benchmark.sh) lists every setting. The ones
 | `PRE_START_HOOK` | Host command run between stopping the target and its measured start, to drop the page cache the restore filled outside the target's budget. On a Podman machine it defaults to dropping the VM's cache, which also cools every other container on the machine; tier 2 sets it to drop the host's, as root. A `bench` record without one fails verification. |
 | `DATASET_ROOT`, `SNAPSHOT_DIR` | Where expanded datasets and snapshots live, so a worktree can use another checkout's. |
 | `KEEP_TARGET=1` | Leave the target running afterwards; by default it is stopped. |
+| `SERVER_TIMING_WAVES=1` | The target adds one `Server-Timing` entry per read wave: `cart`, `lookups`, `customer`, `variants`, `inventory`, `products` and `promotions` (with its candidate count) on a quote, and `product`, `variants`, `lookups`, `inventory`, `related` and `assembly` on a product miss. Each wave is timed from issue to settle, so overlapping waves overlap. Diagnostics only, so measured trials refuse it. After a `TRIALS=0` seed, whose volume keeps the loaded data, start the target by hand with it set: `SERVER_TIMING_WAVES=1 podman compose -f containers/compose.yaml up -d harper`. |
 | `TARGET_IMAGE` | The target image's repository, `<compose project>-harper` by default; each build is a tag. Image names are host-wide, so a second compose project building this target sets its own. |
-| `TARGET_REF` | Build the target's application code from this commit, for example `dd3a5f5^`, the build before quote batching. Each build is its own image, tagged by commit; the Dockerfile, harness, and snapshot stay the checkout's. The record names the build in `conditions.code.commit` and `orchestrator.target.build`. |
+| `TARGET_REF` | Build the target's application code from this commit, for example the checkout with `dd3a5f5` reverted, the build without quote batching. Each build is its own image, tagged by commit; the Dockerfile, harness, and snapshot stay the checkout's. The record names the build in `conditions.code.commit` and `orchestrator.target.build`. |
 
 ## Resource budget
 
@@ -60,8 +61,10 @@ export SCALE=bench TIER=2 COMPOSE_EXTRA=compose.tier2.yaml SAMPLES_DIR=$S/sample
   PRE_START_HOOK='sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null'
 TRIALS=0 ./containers/run-benchmark.sh                                  # build, seed, snapshot
 SKIP_LOAD=1 TRIALS=1 ./containers/run-benchmark.sh                      # the checkout (batched quotes)
-SKIP_LOAD=1 TRIALS=1 TARGET_REF='dd3a5f5^' ./containers/run-benchmark.sh  # the build before batching
+SKIP_LOAD=1 TRIALS=1 TARGET_REF="$UNBATCHED" ./containers/run-benchmark.sh  # the build before batching
 ```
+
+`UNBATCHED` is a commit of the checkout with `dd3a5f5` reverted (`git revert --no-edit dd3a5f5` on a scratch branch). `dd3a5f5^` itself predates the combined promotion key, so it differs in schema and in the promotion lookup as well as in batching.
 
 The snapshot's provenance checks the build's schema, so `TARGET_REF` cannot restore a snapshot whose storage it does not match.
 

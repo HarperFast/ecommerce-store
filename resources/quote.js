@@ -10,8 +10,9 @@
  * cart → variants → products → promotions sets the latency, with customer → inventory beside it.
  */
 import { Resource, tables } from 'harper';
-import { UNRESTRICTED } from '@ecommerce-store/spec';
 import { lookupTable } from './lib/lookup.js';
+import { probeKeys } from './lib/promotion-index.js';
+import { countCandidates, countNestedReads, countReads, settled, waveEntries, waveRecorder, waveStart } from './lib/timing.js';
 import { evaluatePromotions, isEligible, resolveShipping, resolveTax, resolveUnitPrice } from './lib/pricing.js';
 
 const { Cart, Customer, Product, Variant, Inventory, Location, Promotion, Rate } = tables;
@@ -53,11 +54,12 @@ export class quote extends Resource {
 				dataNs += process.hrtime.bigint() - t0;
 			}
 		};
+		const waves = waveRecorder();
 		const target = this.getId ? { id: this.getId() } : this;
 		const cartId = target.id ?? this.id;
 
 		// --- wave 1: the cart -------------------------------------------------------------
-		const cart = await timed(() => Cart.get(cartId));
+		const cart = await timed(() => settled(waves, 'cart', waveStart(waves), Cart.get(cartId)));
 		if (!cart) {
 			const error = new Error('cart not found');
 			error.statusCode = 404;
@@ -76,28 +78,32 @@ export class quote extends Resource {
 		// runs beside it. Reads in a wave that fail are checked below in the original order.
 		const skus = [...new Set(cart.lines.map((line) => line.sku))];
 		const [{ locations, rates }, customer, variantBySku, productById, inventoryBySku, candidateRows] = await timed(() => {
-			const statics = loadStatic();
-			const customerRead = Customer.get(cart.customerId);
-			const variantsRead = Promise.all(skus.map((sku) => Variant.get(sku))).then(
+			const statics = settled(waves, 'lookups', waveStart(waves), loadStatic());
+			const customerRead = settled(waves, 'customer', waveStart(waves), Customer.get(cart.customerId));
+			const variantsRead = settled(waves, 'variants', waveStart(waves), Promise.all(skus.map((sku) => Variant.get(sku))), countReads).then(
 				(variants) => new Map(skus.map((sku, i) => [sku, variants[i]]))
 			);
 			const inventoryRead = Promise.all([customerRead, statics]).then(([customer, { locations }]) => {
 				if (!customer) return null;
 				const regionLocations = locations.filter((l) => l.region === customer.region);
-				return Promise.all(
-					skus.map((sku) => Promise.all(regionLocations.map((l) => Inventory.get(`${sku}:${l.id}`))))
+				return settled(
+					waves,
+					'inventory',
+					waveStart(waves),
+					Promise.all(skus.map((sku) => Promise.all(regionLocations.map((l) => Inventory.get(`${sku}:${l.id}`))))),
+					countNestedReads
 				).then((rows) => new Map(skus.map((sku, i) => [sku, rows[i]])));
 			});
 			const productsRead = variantsRead.then((variantBySku) => {
 				const productIds = [...new Set([...variantBySku.values()].filter(Boolean).map((variant) => variant.productId))];
-				return Promise.all(productIds.map((id) => Product.get(id))).then(
+				return settled(waves, 'products', waveStart(waves), Promise.all(productIds.map((id) => Product.get(id))), countReads).then(
 					(products) => new Map(productIds.map((id, i) => [id, products[i]]))
 				);
 			});
 			const promotionsRead = Promise.all([customerRead, productsRead]).then(([customer, productById]) => {
 				if (!customer) return null;
 				const categoryIds = [...new Set([...productById.values()].filter(Boolean).flatMap((product) => product.categoryIds ?? []))];
-				return collectPromotions(customer.tier, categoryIds);
+				return settled(waves, 'promotions', waveStart(waves), collectPromotions(customer.tier, categoryIds), countCandidates);
 			});
 			return Promise.all([statics, customerRead, variantsRead, productsRead, inventoryRead, promotionsRead]);
 		});
@@ -170,7 +176,7 @@ export class quote extends Resource {
 			// The quote is deliberately not response-cacheable (QUOTE-001), so its cache status
 			// is always `miss` — stated rather than omitted, so a run record can tell "not
 			// cached" apart from "not instrumented".
-			`cache;desc=miss, data;dur=${dataMs.toFixed(2)}, compute;dur=${Math.max(0, totalMs - dataMs).toFixed(2)}, total;dur=${totalMs.toFixed(2)}`
+			`cache;desc=miss, data;dur=${dataMs.toFixed(2)}, compute;dur=${Math.max(0, totalMs - dataMs).toFixed(2)}, total;dur=${totalMs.toFixed(2)}${waveEntries(waves)}`
 		);
 
 		return {
@@ -207,7 +213,7 @@ export class quote extends Resource {
 /**
  * Candidate promotions, by indexed probe.
  *
- * This has been wrong twice, in opposite directions, and both failures are instructive.
+ * This has been wrong three times, and each failure is instructive.
  *
  * First it probed `tiers = <tier>` and `categoryIds = <category>`. An empty eligibility
  * array means "no restriction on this dimension", and an index cannot match an empty array —
@@ -217,12 +223,18 @@ export class quote extends Resource {
  * Then it scanned the whole table, which is correct and does not scale: `bench` carries 5,000
  * promotions and that scan ran on every quote.
  *
- * Now the rows carry `tierKeys` / `categoryKeys` — the same values, or `['*']` when
- * unrestricted — so "applies to everything" is an indexable value like any other. One `in`
- * probe per dimension covers both cases, and the two conditions AND to a superset of the
- * eligible set. `isEligible` still applies the authoritative arrays, including `skus`, which
- * is not indexed because a SKU-restricted promotion is still reachable through its other two
- * dimensions.
+ * Then the rows carried `tierKeys` / `categoryKeys` — the same values, or `['*']` when
+ * unrestricted — probed with one `in` per dimension and ANDed. Correct, and on `bench` still
+ * about as slow as the scan: Harper 5.3.2 answers `in` by walking the attribute's whole index
+ * (harper#3240), then reads every row the first condition matches to test the second
+ * (docs/data-model.md#promotion-eligibility-index).
+ *
+ * Now each row carries one `eligibilityKeys` entry per (tier key, category key) pair — the
+ * AND of the two dimensions, computed by the schema and indexed — and the cart asks for the
+ * pairs it can match. Each is an exact equality probe, a bounded index range, and their union
+ * is the same candidate set without reading a row the AND would discard. `isEligible` still
+ * applies the authoritative arrays, including `skus`, which is not indexed because a
+ * SKU-restricted promotion is still reachable through its other two dimensions.
  *
  * The result is a SUPERSET, never a subset — that is the property that matters, and
  * `scripts/verify-promotion-index.mjs` checks it against a full scan.
@@ -230,14 +242,12 @@ export class quote extends Resource {
 async function collectPromotions(tier, categoryIds) {
 	const rows = [];
 	for await (const row of Promotion.search({
-		conditions: [
-			{ attribute: 'tierKeys', comparator: 'in', value: [tier, UNRESTRICTED] },
-			{ attribute: 'categoryKeys', comparator: 'in', value: [...categoryIds, UNRESTRICTED] },
-		],
+		operator: 'or',
+		conditions: probeKeys(tier, categoryIds).map((value) => ({ attribute: 'eligibilityKeys', value })),
 	})) {
 		rows.push(row);
 	}
-	// Sorted: the scan order of two ANDed index probes is not guaranteed, and evaluation
-	// order feeds the normative promotion order (QUOTE-008).
+	// Sorted: the order of a union of index probes is not guaranteed, and evaluation order
+	// feeds the normative promotion order (QUOTE-008).
 	return rows.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 }
