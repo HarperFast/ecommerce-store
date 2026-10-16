@@ -11,7 +11,7 @@
  */
 import { Resource, tables } from 'harper';
 import { lookupTable } from './lib/lookup.js';
-import { probeKeys } from './lib/promotion-index.js';
+import { candidateConditions } from './lib/promotion-index.js';
 import { countCandidates, countNestedReads, countReads, settled, waveEntries, waveRecorder, waveStart } from './lib/timing.js';
 import { evaluatePromotions, isEligible, resolveShipping, resolveTax, resolveUnitPrice } from './lib/pricing.js';
 
@@ -103,7 +103,7 @@ export class quote extends Resource {
 			const promotionsRead = Promise.all([customerRead, productsRead]).then(([customer, productById]) => {
 				if (!customer) return null;
 				const categoryIds = [...new Set([...productById.values()].filter(Boolean).flatMap((product) => product.categoryIds ?? []))];
-				return settled(waves, 'promotions', waveStart(waves), collectPromotions(customer.tier, categoryIds), countCandidates);
+				return settled(waves, 'promotions', waveStart(waves), collectPromotions(customer.tier, categoryIds, skus), countCandidates);
 			});
 			return Promise.all([statics, customerRead, variantsRead, productsRead, inventoryRead, promotionsRead]);
 		});
@@ -229,22 +229,21 @@ export class quote extends Resource {
  * (harper#3240), then reads every row the first condition matches to test the second
  * (docs/data-model.md#promotion-eligibility-index).
  *
- * Now each row carries one `eligibilityKeys` entry per (tier key, category key) pair — the
- * AND of the two dimensions, computed by the schema and indexed — and the cart asks for the
- * pairs it can match. Each is an exact equality probe, a bounded index range, and their union
- * is the same candidate set without reading a row the AND would discard. `isEligible` still
- * applies the authoritative arrays, including `skus`, which is not indexed because a
- * SKU-restricted promotion is still reachable through its other two dimensions.
+ * Now the specification defines the candidate set (ecommerce-store PR #7, SPEC.md 0.3.0):
+ * every promotion open to all SKUs whose tiers and categories admit the cart, plus every
+ * promotion naming one of the cart's SKUs, whatever its tiers and categories. Campaigns carry
+ * one `eligibilityKeys` entry per (tier, category) pair — the AND of the two dimensions,
+ * computed by the schema and indexed — and the cart asks for the pairs it can match.
+ * SKU-scoped promotions are found by `skus`, one equality probe per cart SKU. Every probe is a
+ * bounded index range, and their union is exactly the candidate set. `isEligible` still
+ * decides each line on all three authoritative arrays.
  *
- * The result is a SUPERSET, never a subset — that is the property that matters, and
- * `scripts/verify-promotion-index.mjs` checks it against a full scan.
+ * The result is exactly the candidate set, and so a SUPERSET of the eligible set, never a
+ * subset — `scripts/verify-promotion-index.mjs` checks both against the dataset.
  */
-async function collectPromotions(tier, categoryIds) {
+async function collectPromotions(tier, categoryIds, skus) {
 	const rows = [];
-	for await (const row of Promotion.search({
-		operator: 'or',
-		conditions: probeKeys(tier, categoryIds).map((value) => ({ attribute: 'eligibilityKeys', value })),
-	})) {
+	for await (const row of Promotion.search({ operator: 'or', conditions: candidateConditions(tier, categoryIds, skus) })) {
 		rows.push(row);
 	}
 	// Sorted: the order of a union of index probes is not guaranteed, and evaluation order
