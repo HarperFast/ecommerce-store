@@ -1,8 +1,4 @@
-/**
- * The keys a cart probes `Promotion.eligibilityKeys` with. The schema's `@computed` expression
- * builds the keys each promotion is indexed under; scripts/verify-promotion-index.mjs fails if
- * the two formats disagree.
- */
+/** The keys a cart probes `Promotion.eligibilityKeys` with; see its `@computed` expression in schemas/store.graphql. */
 import { UNRESTRICTED } from '@ecommerce-store/spec';
 
 function eligibilityKey(tierKey, categoryKey) {

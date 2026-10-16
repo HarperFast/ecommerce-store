@@ -34,7 +34,8 @@
 #   BENCH_ARGS       extra arguments for bench/run.mjs, e.g. `--quote-share 1` (recorded with the run)
 #   TARGET_IMAGE     the target image's repository; tags are the build   (<compose project>-harper)
 #   TARGET_REF       build the target's application code from this commit instead of the
-#                    checkout, e.g. `dd3a5f5^`; the Dockerfile, harness and snapshot are the
+#                    checkout, e.g. the checkout with dd3a5f5 reverted (its schema must match the
+#                    snapshot's); the Dockerfile, harness and snapshot are the
 #                    checkout's, and the record names the commit each trial's target came from
 #   ALLOW_UNVERIFIED_SNAPSHOT=1   restore a snapshot whose provenance is missing or differs
 set -euo pipefail

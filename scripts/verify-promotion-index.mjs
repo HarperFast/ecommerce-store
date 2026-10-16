@@ -51,7 +51,6 @@ const indexedKeys = new Function('attributes', 'record', `with (attributes) { wi
 const keysOf = (promotion) => new Set(indexedKeys(declared, promotion));
 const keysByPromotion = new Map(promotions.map((p) => [p.id, keysOf(p)]));
 
-/** The same narrowing the indexed probe performs: any of the cart's probe keys among the row's indexed keys. */
 const probe = (tier, categoryIds) => {
 	const wanted = probeKeys(tier, categoryIds);
 	return promotions.filter((p) => wanted.some((key) => keysByPromotion.get(p.id).has(key)));
