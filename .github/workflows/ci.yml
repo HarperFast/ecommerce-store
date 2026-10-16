@@ -53,6 +53,11 @@ jobs:
       - name: The promotion index never excludes an eligible promotion
         run: npm run check:index
 
+      # Every pricing phase has to fire in the workload, or the benchmark does not measure it.
+      # `bench` needs LFS, so the dataset workflow checks it.
+      - name: The dev dataset reaches every pricing phase
+        run: node scripts/verify-pricing-phases.mjs --scale dev
+
       # The generator and the harness share one access distribution; its head claim is checked
       # by counting draws, and its scramble by exhausting the key space.
       - name: The access distribution does what it claims

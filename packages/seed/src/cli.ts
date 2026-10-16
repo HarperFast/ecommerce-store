@@ -16,9 +16,9 @@ import { Readable } from 'node:stream';
 import { join, resolve } from 'node:path';
 import { Rng } from './prng.ts';
 import {
-	SCALES, carts, customers, inventory, locations, products, promotions, rates, variantShape, variants,
+	CAMPAIGNS, EXCLUSIVE_CATEGORIES, SCALES, carts, customers, inventory, locations, products, promotions, rates, variantShape, variants,
 } from './generate.ts';
-import { ACCESS_SKEW, REGION_WEIGHTS, SCRAMBLE_SEED, TIER_WEIGHTS, zipfMass } from '@ecommerce-store/spec';
+import { ACCESS_SKEW, REGION_WEIGHTS, SCRAMBLE_SEED, SPEC_VERSION, TIER_WEIGHTS, zipfMass } from '@ecommerce-store/spec';
 import { GENERATOR_VERSION, type DatasetManifest, type Table } from './index.ts';
 
 /**
@@ -84,16 +84,17 @@ const files = {} as DatasetManifest['files'];
 
 files.location = await writeTable(outDir, 'location', locations(scale), compress);
 files.customer = await writeTable(outDir, 'customer', customers(scale, new Rng(`${seed}:customer`)), compress);
-files.product = await writeTable(outDir, 'product', products(scale, counts, new Rng(`${seed}:product`)), compress);
+const categoryOf = new Uint8Array(scale.products);
+files.product = await writeTable(outDir, 'product', products(scale, counts, new Rng(`${seed}:product`), categoryOf), compress);
 files.variant = await writeTable(outDir, 'variant', variants(scale, counts, new Rng(`${seed}:variant`)), compress);
 files.inventory = await writeTable(outDir, 'inventory', inventory(scale, counts, new Rng(`${seed}:inventory`)), compress);
-files.promotion = await writeTable(outDir, 'promotion', promotions(scale, new Rng(`${seed}:promotion`)), compress);
+files.promotion = await writeTable(outDir, 'promotion', promotions(scale, counts, categoryOf, `${seed}:promotion`), compress);
 files.rate = await writeTable(outDir, 'rate', rates(), compress);
 const cartStats = { lines: 0, headLines: 0, topLines: 0 };
 files.cart = await writeTable(outDir, 'cart', carts(scale, counts, new Rng(`${seed}:cart`), ACCESS_SKEW.headShare, cartStats), compress);
 
 const manifest: DatasetManifest = {
-	specVersion: '0.2.0-draft',
+	specVersion: SPEC_VERSION,
 	generatorVersion: GENERATOR_VERSION,
 	scale: scaleName,
 	seed,
@@ -105,9 +106,17 @@ const manifest: DatasetManifest = {
 		// generator silently dropped colliding SKUs, so shipped carts were ~13% smaller than
 		// the manifest said.
 		cartSize: 'long-tailed, 1-25 distinct SKUs; collisions redrawn, not dropped',
-		locationsPerSku: '1-6 of 8',
+		locationsPerSku: '2-8 of 8',
 		tier: 'standard 60 / silver 25 / gold 12 / platinum 3',
 		outOfStockRate: 0.12,
+		// Measured per pricing phase by scripts/verify-pricing-phases.mjs, which `npm run check` runs.
+		promotions: {
+			campaigns: CAMPAIGNS,
+			campaignKinds: `${EXCLUSIVE_CATEGORIES} exclusive (one per category, each for one member tier, minimum spend); the rest stackable 50 / threshold 25 / bogo 25, thresholds scoped to one tier and one category`,
+			productPromotions: scale.promotions - CAMPAIGNS,
+			productPromotion: 'one product\'s SKUs and category, 70% open to every tier; products drawn from the access distribution, none twice; stackable 75 / bogo 25',
+			order: 'campaign and product promotions interleaved by id',
+		},
 		// Fully specified by @ecommerce-store/spec: P(rank k) proportional to (k + 1) ** -s, rank
 		// mapped to a key by the seeded Feistel scramble. The dataset and the load generator
 		// draw from it, so the hot products are the same on both sides. Declared AND measured:

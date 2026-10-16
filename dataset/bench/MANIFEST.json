@@ -1,6 +1,6 @@
 {
-  "specVersion": "0.2.0-draft",
-  "generatorVersion": "0.5.0",
+  "specVersion": "0.3.0-draft",
+  "generatorVersion": "0.6.0",
   "scale": "bench",
   "seed": "harper-ecommerce-store-v1",
   "compressed": true,
@@ -26,7 +26,7 @@
       "rows": 31281273
     },
     "promotion": {
-      "sha256": "9c55b4d48ac14f9f74c8ff3e5b0aa0b7ee4e6779050879c526257cdbeed2cadd",
+      "sha256": "62e91ff853dba18010472492c2057a47793aaf28f364cd3cad620dc2ddbe0e4f",
       "rows": 5000
     },
     "rate": {
@@ -41,9 +41,16 @@
   "distributions": {
     "variantsPerProduct": "long-tailed, 1-20",
     "cartSize": "long-tailed, 1-25 distinct SKUs; collisions redrawn, not dropped",
-    "locationsPerSku": "1-6 of 8",
+    "locationsPerSku": "2-8 of 8",
     "tier": "standard 60 / silver 25 / gold 12 / platinum 3",
     "outOfStockRate": 0.12,
+    "promotions": {
+      "campaigns": 120,
+      "campaignKinds": "4 exclusive (one per category, each for one member tier, minimum spend); the rest stackable 50 / threshold 25 / bogo 25, thresholds scoped to one tier and one category",
+      "productPromotions": 4880,
+      "productPromotion": "one product's SKUs and category, 70% open to every tier; products drawn from the access distribution, none twice; stackable 75 / bogo 25",
+      "order": "campaign and product promotions interleaved by id"
+    },
     "accessSkew": {
       "form": "discrete Zipf over product rank, scrambled to key",
       "exponent": 0.8845,

@@ -36,15 +36,16 @@ Two rules keep it coherent under concurrency:
 
 - **Invalidate after the write commits.** Harper orders writes to a key by transaction start time. An invalidation staged in the write's own transaction carries that start time, so a fill that read the old row before the commit could outrank it and cache the old value until expiry. The admin surface commits, then invalidates in the next transaction; [verify-coherence.mjs](../scripts/verify-coherence.mjs) checks it with readers racing writers.
 - **Read through the fill's own context.** Harper 5.3.2 runs queued fills from a chain that carries the first fill's async context, so a resolver's ambient table reads joined another fill's transaction and older snapshot: 16,226 of 16,310 fills in one test ran under a context not their own. The resolver passes its `sourceContext` to every read.
-- **Evict in a transaction of its own, with retries.** The write is durable once committed; a client disconnect or a commit conflict with a concurrent fill must not cancel the eviction.
+- **Evict in a transaction of its own, with retries.** The write has committed by then; a client disconnect or a commit conflict with a concurrent fill must not cancel the eviction.
 - **Key only on values the write surface invalidates.** A tier outside the normative table resolves as `standard` before the key is built, and an unknown region is a 400; otherwise any query string could mint a view no write would ever evict.
 - **Cache status is Harper's `loadedFromSource`.** `miss` means this request ran the fill. A request that waited on another request's in-flight fill of the same key reports `hit`.
 
 Freshness within `FRESH_MS` holds for writes through the application's write surface. A view also depends on the product row, related products, locations, and which variants exist; P0 writes none of them, and a direct write to one over REST or the operations API converges only on the 120 s expiry, as [Background writes](../SPEC.md#background-writes) describes for direct datastore writes.
 
-Per-worker memos of the location and rate tables expire after 500 ms, half of `FRESH_MS` ([lookup.js](../resources/lib/lookup.js)), so a write to either reaches quotes within the budget.
+Per-worker memos of the location and rate tables expire after 500 ms, half of `FRESH_MS` ([lookup.js](../resources/lib/lookup.js)). Since spec `0.3.0-draft`, `CACHE-002` does not require that: neither table has a write surface ([Caching](../SPEC.md#caching)). The bound stays so that a write over REST still reaches quotes within the budget.
 
 ## Open
 
 - **Pricing review:** the normative [promotion order](../SPEC.md#promotion-evaluation-order) still needs review by someone with pricing-engine experience.
+- **SKU-aware lookup:** since dataset `0.6.0`, most `bench` promotions are restricted to one product's SKUs. Each carries its product's category, so the tier × category probe still returns every candidate, but it returns about 909 rows per `bench` quote against a [candidate set](../SPEC.md#promotions-are-read-per-quote) of about 10. The lookup should also probe by the cart's SKUs.
 - **Index selectivity:** the recorded `dev` check narrowed candidates to 7.2% of the table. A tier-only probe is limited by four tiers plus storewide offers. A composite `(tierKey, categoryKey)` index or combined key might narrow further; measure at `bench` scale before choosing one.
