@@ -34,7 +34,7 @@ import { evaluatePromotions, isEligible, resolveUnitPrice } from '../resources/l
  * at both scales: `dev` is where the suite runs, and a phase it exercises that `bench` does not
  * is a phase the benchmark does not measure.
  */
-export const BANDS = {
+const BANDS = {
 	exclusive: [0.05, 0.25],
 	threshold: [0.4, 0.8],
 	bogo: [0.3, 0.65],
