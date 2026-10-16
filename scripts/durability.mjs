@@ -75,11 +75,12 @@ export function parseStrace(text) {
 			const [, tid, timestamp, name, args] = match;
 			if (TRACED.includes(name)) pending.set(tid, { name, args, startMs: Number(timestamp) * 1000 });
 		} else if ((match = line.match(RESUMED))) {
-			const [, tid, timestamp, name, , returned, returnedPath] = match;
+			const [, tid, timestamp, name, rest, returned, returnedPath] = match;
 			const started = pending.get(tid);
 			if (!started || started.name !== name) continue;
 			pending.delete(tid);
-			calls.push(traced(tid, name, started.args, started.startMs, Number(timestamp) * 1000, returned, returnedPath));
+			// Arguments printed after the interruption, such as a trailing RWF_DSYNC, are on this line.
+			calls.push(traced(tid, name, `${started.args}${rest}`, started.startMs, Number(timestamp) * 1000, returned, returnedPath));
 		}
 	}
 	return calls;
@@ -93,13 +94,16 @@ export function parseStrace(text) {
  * was attached) and replaying every later open, dup and close. A descriptor that changed while
  * the snapshot was being read, or while a write through it was running, is unknown.
  *
- * Also returns the log-relevant paths opened `O_CREAT` during the trace, with when: syncing a new
- * file's contents does not make its directory entry durable.
+ * Also returns the paths an `O_CREAT` open or `creat` may have created during the trace, with when:
+ * syncing a new file's contents does not make its directory entry durable. A path the snapshot
+ * or an earlier traced call already names existed, so opening it `O_CREAT` without `O_EXCL`
+ * creates nothing.
  */
 export function descriptorFlags(calls, { tasks, snapshot, snapshotMs, snapshotEndMs = snapshotMs }) {
 	const table = new Map(snapshot);
 	const flags = new Map();
 	const created = new Map();
+	const known = new Set([...snapshot.values()].map((entry) => entry.path));
 	const tgidOf = (tid) => tasks.get(tid) ?? null;
 	const changes = calls.filter((c) => DESCRIPTOR_CALLS.includes(c.call) && c.ok && c.endMs > snapshotMs);
 	const writes = calls.filter((c) => WRITE_CALLS.includes(c.call) && c.ok);
@@ -112,6 +116,7 @@ export function descriptorFlags(calls, { tasks, snapshot, snapshotMs, snapshotEn
 	].sort((a, b) => a.at - b.at);
 	for (const { change, write } of events) {
 		if (write) {
+			known.add(write.path);
 			if (/\bRWF_D?SYNC\b/.test(write.args)) {
 				flags.set(write, true);
 				continue;
@@ -139,7 +144,11 @@ export function descriptorFlags(calls, { tasks, snapshot, snapshotMs, snapshotEn
 		} else {
 			table.set(key, { path: change.returnedPath, dsync: /\bO_D?SYNC\b/.test(change.args) });
 		}
-		if ((change.call === 'creat' || /\bO_CREAT\b/.test(change.args)) && change.returnedPath) created.set(change.returnedPath, change.endMs);
+		const path = change.returnedPath;
+		// O_EXCL succeeds only by creating the file; otherwise a known path already existed.
+		const creates = /\bO_EXCL\b/.test(change.args) || (!known.has(path) && (change.call === 'creat' || /\bO_CREAT\b/.test(change.args)));
+		if (path && creates) created.set(path, change.endMs);
+		if (path) known.add(path);
 	}
 	return { flags, created };
 }
@@ -153,7 +162,10 @@ export function judgeDurability(writes, calls, { log, flags = new Map(), created
 	const inLog = (path) => typeof path === 'string' && path.includes(log);
 	const logWrites = calls.filter((c) => WRITE_CALLS.includes(c.call) && c.ok && inLog(c.path));
 	const syncs = calls.filter((c) => SYNC_CALLS.includes(c.call) && c.ok);
-	const within = (c, w) => c.startMs >= w.sentMs && c.endMs <= w.ackedMs + 1;
+	// `Date.now()` truncates, so a call may end up to 1 ms after the recorded acknowledgement; a
+	// window never reaches the next write's send, so evidence cannot be credited to two writes.
+	const upper = new Map(writes.map((w, i) => [w, Math.min(w.ackedMs + 1, writes[i + 1]?.sentMs ?? Infinity)]));
+	const within = (c, w) => c.startMs >= w.sentMs && c.endMs <= upper.get(w);
 	const barrierFor = (sync, path) => ((sync.call === 'fsync' || sync.call === 'fdatasync') && sync.path === path) || sync.call === 'sync';
 	const parentOf = (path) => path.slice(0, path.lastIndexOf('/')) || '/';
 
@@ -166,11 +178,11 @@ export function judgeDurability(writes, calls, { log, flags = new Map(), created
 			const barrier = syncs.find((s) => within(s, w) && s.startMs >= last && barrierFor(s, path));
 			const dsync = toPath.map((c) => flags.get(c) ?? null);
 			const held = barrier ? `${barrier.call} after the log write` : dsync.every((d) => d === true) ? 'O_DSYNC log write' : null;
-			if (held && created.has(path)) {
+			const at = created.get(path);
+			if (held && at !== undefined && at <= last) {
 				// A new file's contents can be durable while its directory entry is not.
-				const at = created.get(path);
-				const dirSynced = syncs.some((s) => (s.call === 'fsync' || s.call === 'fdatasync') && s.path === parentOf(path) && s.startMs >= at && s.endMs <= w.ackedMs + 1);
-				if (!dirSynced && !(barrier?.call === 'sync' && barrier.startMs >= at)) return { result: 'inconclusive', why: 'log file created, directory not synced' };
+				const dirSynced = syncs.some((s) => (((s.call === 'fsync' || s.call === 'fdatasync') && s.path === parentOf(path)) || s.call === 'sync') && s.startMs >= at && s.endMs <= upper.get(w));
+				if (!dirSynced) return { result: 'inconclusive', why: 'log file created, directory not synced' };
 			}
 			if (held) return { result: 'holds', why: held };
 			if (syncs.some((s) => within(s, w) && s.startMs >= last && s.call === 'syncfs' && inLog(s.path))) return { result: 'inconclusive', why: 'syncfs, filesystem unknown' };

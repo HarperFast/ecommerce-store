@@ -22,6 +22,7 @@
  * COVERS: WRITE-005
  */
 import { spawn } from 'node:child_process';
+import { rmSync } from 'node:fs';
 import { mkdtemp, readFile, readdir, readlink, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -44,7 +45,10 @@ if (!PIDS.length || !LOG) {
 	console.error('usage: node scripts/verify-durability.mjs --url <target> --pid <pid>[,<pid>...] --log <commit-log path fragment> [--writes 50]');
 	process.exit(2);
 }
+// Replaced once the tracer runs, so every exit detaches it and removes the trace.
+let cleanup = () => {};
 const inconclusive = (message) => {
+	cleanup();
 	console.error(`INCONCLUSIVE — ${message}. No verdict on WRITE-005.`);
 	process.exit(2);
 };
@@ -77,6 +81,13 @@ const exited = new Promise((resolve) => {
 		resolve();
 	});
 });
+cleanup = () => {
+	if (strace.exitCode === null && strace.signalCode === null) {
+		stopping = true;
+		strace.kill('SIGINT');
+	}
+	rmSync(dir, { recursive: true, force: true });
+};
 
 // Attached once the kernel names a tracer for every process; until then a write goes unseen.
 const tracerOf = async (pid) => Number((await readFile(`/proc/${pid}/status`, 'utf8')).match(/^TracerPid:\s+(\d+)/m)?.[1]);
@@ -91,38 +102,55 @@ for (let attempt = 0; ; attempt++) {
 const tasks = new Map();
 const snapshot = new Map();
 const snapshotMs = Date.now();
-for (const pid of PIDS) {
-	for (const tid of await readdir(`/proc/${pid}/task`)) tasks.set(Number(tid), Number(pid));
-	for (const fd of await readdir(`/proc/${pid}/fd`)) {
-		try {
-			const path = await readlink(`/proc/${pid}/fd/${fd}`);
-			if (!path.includes(LOG)) continue;
-			const flags = Number.parseInt((await readFile(`/proc/${pid}/fdinfo/${fd}`, 'utf8')).match(/^flags:\s+([0-7]+)/m)[1], 8);
-			snapshot.set(`${pid}:${fd}`, { path, dsync: Boolean(flags & O_DSYNC) });
-		} catch {
-			// Closed while being read: the trace records what replaces it.
+try {
+	for (const pid of PIDS) {
+		for (const tid of await readdir(`/proc/${pid}/task`)) tasks.set(Number(tid), Number(pid));
+		for (const fd of await readdir(`/proc/${pid}/fd`)) {
+			try {
+				const path = await readlink(`/proc/${pid}/fd/${fd}`);
+				if (!path.includes(LOG)) continue;
+				const flags = Number.parseInt((await readFile(`/proc/${pid}/fdinfo/${fd}`, 'utf8')).match(/^flags:\s+([0-7]+)/m)[1], 8);
+				snapshot.set(`${pid}:${fd}`, { path, dsync: Boolean(flags & O_DSYNC) });
+			} catch {
+				// Closed while being read: the trace records what replaces it.
+			}
 		}
 	}
+} catch (error) {
+	inconclusive(`could not read the traced processes' descriptors (${error.message})`);
 }
 const snapshotEndMs = Date.now() + 1;
 
 const writes = [];
+let failure = null;
 try {
 	// Two unjudged writes first, so a lazily opened file or a first-write path is not judged.
 	await writePrice(original + 1);
 	await writePrice(original + 2);
 	for (let i = 0; i < WRITES; i++) {
+		// A gap past the 1 ms the judge allows after an acknowledgement, so no call falls in two
+		// writes' windows.
+		await sleep(2);
 		const sentMs = Date.now();
 		await writePrice(original + 3 + i);
 		writes.push({ sentMs, ackedMs: Date.now() });
 	}
+	// Threads started during the run belong to their process too.
+	for (const pid of PIDS) for (const tid of await readdir(`/proc/${pid}/task`)) tasks.set(Number(tid), Number(pid));
+} catch (error) {
+	failure = error;
 } finally {
-	await writePrice(original);
+	try {
+		await writePrice(original);
+	} catch (error) {
+		console.error(`could not restore ${sku} to ${original}: ${error.message}`);
+	}
 	await sleep(200);
 	stopping = true;
 	strace.kill('SIGINT');
 	await exited;
 }
+if (failure) inconclusive(`a write through the write surface failed (${failure.message})`);
 if (died !== null) inconclusive(`strace exited during the run (${died}), so the trace is partial`);
 
 const calls = parseStrace(await readFile(log, 'utf8'));

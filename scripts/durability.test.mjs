@@ -116,6 +116,58 @@ test('what the trace cannot tie to the log is inconclusive, not a pass', () => {
 	assert.equal(judgeDurability(writes, overlapping, { log: '/pg_wal/', flags: overlapFlags }).verdict, 'inconclusive', 'replaced mid-write');
 });
 
+test('back-to-back writes each keep their own window', () => {
+	// The second write is sent in the same millisecond the first is acknowledged.
+	const pair = [{ sentMs: T0, ackedMs: T0 }, { sentMs: T0, ackedMs: T0 + 1 }];
+	const synced = parseStrace([
+		`431 ${sec(0.2)} pwrite64(${WAL}, "x"..., 8192, 0) = 8192 <0.000050>`,
+		`431 ${sec(0.3)} fdatasync(${WAL}) = 0 <0.000400>`,
+		`431 ${sec(0.9)} pwrite64(${WAL}, "x"..., 8192, 0) = 8192 <0.000050>`,
+		`431 ${sec(1.0)} fdatasync(${WAL}) = 0 <0.000400>`,
+	].join('\n'));
+	const flags = new Map(synced.map((c) => [c, false]));
+	const both = judgeDurability(pair, synced, { log: '/pg_wal/', flags });
+	assert.notEqual(both.judged[0].result, 'fails', "the first write is not judged by the second's append");
+
+	const unsynced = parseStrace([
+		`431 ${sec(0.1)} pwrite64(${WAL}, "x"..., 8192, 0) = 8192 <0.000050>`,
+		`431 ${sec(0.3)} pwrite64(${WAL}, "x"..., 8192, 0) = 8192 <0.000050>`,
+		`431 ${sec(0.4)} fdatasync(${WAL}) = 0 <0.000400>`,
+	].join('\n'));
+	const borrowed = judgeDurability([{ sentMs: T0, ackedMs: T0 }, { sentMs: T0 + 0.25, ackedMs: T0 + 1 }], unsynced, { log: '/pg_wal/', flags: new Map(unsynced.map((c) => [c, false])) });
+	assert.equal(borrowed.judged[0].result, 'fails', "the first write cannot borrow the second's sync");
+});
+
+test('a new log file needs its directory synced, from its creation on', () => {
+	const tasks = new Map([[431, 430]]);
+	const NEXT = '/var/lib/postgresql/data/pg_wal/000000010000000000000002';
+	const lines = [
+		trace((i) => (i < 5 ? [walAppend(i), walSync(i)] : [])),
+		// An existing segment reopened O_CREAT creates nothing.
+		`431 ${sec(44)} openat(AT_FDCWD</var/lib/postgresql/data>, "pg_wal/000000010000000000000001", O_WRONLY|O_CREAT) = 15<${WAL_PATH}> <0.000030>`,
+		`431 ${sec(45)} openat(AT_FDCWD</var/lib/postgresql/data>, "pg_wal/000000010000000000000002", O_WRONLY|O_CREAT|O_EXCL) = 16<${NEXT}> <0.000030>`,
+		`431 ${sec(46)} sync() = 0 <0.000500>`,
+		trace((i) => (i >= 5 ? [`431 ${sec(i * 10 + 1)} pwrite64(16<${NEXT}>, "x"..., 8192, 0) = 8192 <0.000040>`, `431 ${sec(i * 10 + 2)} fdatasync(16<${NEXT}>) = 0 <0.000800>`] : [])),
+	].join('\n');
+	const calls = parseStrace(lines);
+	const { flags, created } = descriptorFlags(calls, { tasks, snapshot: new Map([['430:12', { path: WAL_PATH, dsync: false }]]), snapshotMs: T0 - 1000 });
+	assert.deepEqual([...created.keys()], [NEXT], 'only the segment that did not exist');
+	assert.equal(judgeDurability(writes, calls, { log: '/pg_wal/', flags, created }).verdict, 'holds', 'earlier writes unaffected, and sync() covers the new directory entry');
+	const unsyncedDir = parseStrace(lines.replace(/\n.* sync\(\) = 0 <0\.000500>/, ''));
+	const result = descriptorFlags(unsyncedDir, { tasks, snapshot: new Map([['430:12', { path: WAL_PATH, dsync: false }]]), snapshotMs: T0 - 1000 });
+	const judged = judgeDurability(writes, unsyncedDir, { log: '/pg_wal/', ...result }).judged;
+	assert.deepEqual(judged.map((w) => w.result), [...Array(5).fill('holds'), ...Array(5).fill('inconclusive')]);
+});
+
+test('arguments after an interruption come from the resumed line', () => {
+	const calls = parseStrace(trace((i) => [
+		`431 ${sec(i * 10 + 1)} pwritev2(${WAL}, [{iov_base="x", iov_len=8192}], 1, 0 <unfinished ...>`,
+		`431 ${sec(i * 10 + 2)} <... pwritev2 resumed>, RWF_DSYNC) = 8192 <0.001000>`,
+	]));
+	const { flags } = descriptorFlags(calls, { tasks: new Map([[431, 430]]), snapshot: new Map([['430:12', { path: WAL_PATH, dsync: false }]]), snapshotMs: T0 - 1000 });
+	assert.equal(judgeDurability(writes, calls, { log: '/pg_wal/', flags }).verdict, 'holds');
+});
+
 test('a call interrupted by another thread is joined across its unfinished and resumed lines', () => {
 	const calls = parseStrace(trace((i) => [
 		walAppend(i, 0.5),
