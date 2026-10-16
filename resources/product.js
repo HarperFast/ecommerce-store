@@ -14,6 +14,7 @@
 import { RequestTarget, Resource, tables } from 'harper';
 import { lookupTable } from './lib/lookup.js';
 import { resolveUnitPrice } from './lib/pricing.js';
+import { countNestedReads, countReads, countRows, record, settled, waveEntries, waveRecorder, waveStart } from './lib/timing.js';
 
 const { Product, Variant, Inventory, Location, ProductView } = tables;
 
@@ -54,6 +55,7 @@ const loadLocations = lookupTable(async () => {
  */
 async function assemble(productId, tier, region, context) {
 	const started = process.hrtime.bigint();
+	const waves = waveRecorder();
 	let dataNs = 0n;
 	const timed = async (read) => {
 		const t0 = process.hrtime.bigint();
@@ -64,15 +66,17 @@ async function assemble(productId, tier, region, context) {
 		}
 	};
 
-	const row = await timed(() => Product.get(productId, context));
+	const row = await timed(() => settled(waves, 'product', waveStart(waves), Product.get(productId, context)));
 	if (!row) return null;
 
 	const [locations, variants] = await timed(async () => {
+		const variantsStarted = waveStart(waves);
 		const found = [];
 		for await (const variant of Variant.search({ conditions: [{ attribute: 'productId', value: productId }] }, context)) {
 			found.push(variant);
 		}
-		return [await loadLocations(), found];
+		record(waves, 'variants', variantsStarted, found, countRows);
+		return [await settled(waves, 'lookups', waveStart(waves), loadLocations()), found];
 	});
 	// Sorted: Harper's scan order is not guaranteed, and an unordered variant array would make
 	// two identical requests return different bytes from the same data.
@@ -84,8 +88,14 @@ async function assemble(productId, tier, region, context) {
 	// depend on inventory, and awaiting inventory first serialized two independent waves.
 	const [inventory, related] = await timed(() =>
 		Promise.all([
-			Promise.all(variants.map((variant) => Promise.all(locationIds.map((id) => Inventory.get(`${variant.sku}:${id}`, context))))),
-			Promise.all((row.relatedProductIds ?? []).map((id) => Product.get(id, context))),
+			settled(
+				waves,
+				'inventory',
+				waveStart(waves),
+				Promise.all(variants.map((variant) => Promise.all(locationIds.map((id) => Inventory.get(`${variant.sku}:${id}`, context))))),
+				countNestedReads
+			),
+			settled(waves, 'related', waveStart(waves), Promise.all((row.relatedProductIds ?? []).map((id) => Product.get(id, context))), countReads),
 		])
 	);
 
@@ -110,7 +120,9 @@ async function assemble(productId, tier, region, context) {
 		tier,
 		region,
 	};
-	return { payload, computeNs: process.hrtime.bigint() - started - dataNs };
+	const assemblyNs = process.hrtime.bigint() - started;
+	waves?.push(`assembly;dur=${ms(assemblyNs)}`);
+	return { payload, computeNs: assemblyNs - dataNs, waves };
 }
 
 /**
@@ -125,7 +137,10 @@ ProductView.sourcedFrom({
 		if (!assembled) return null;
 		// The request whose miss ran this fill reports its compute phase. The fill runs in its
 		// own context; `requestContext` is the request that triggered it.
-		if (sourceContext?.requestContext) sourceContext.requestContext.productAssemblyComputeNs = assembled.computeNs;
+		if (sourceContext?.requestContext) {
+			sourceContext.requestContext.productAssemblyComputeNs = assembled.computeNs;
+			if (assembled.waves) sourceContext.requestContext.productAssemblyWaves = assembled.waves;
+		}
 		return { id, productId, tier, region, payload: assembled.payload };
 	},
 });
@@ -179,7 +194,7 @@ export class product extends Resource {
 		const dataNs = readNs - assemblyComputeNs;
 		context?.responseHeaders?.set(
 			'Server-Timing',
-			`cache;desc=${miss ? 'miss' : 'hit'}, data;dur=${ms(dataNs)}, compute;dur=${ms(totalNs - dataNs)}, total;dur=${ms(totalNs)}`
+			`cache;desc=${miss ? 'miss' : 'hit'}, data;dur=${ms(dataNs)}, compute;dur=${ms(totalNs - dataNs)}, total;dur=${ms(totalNs)}${miss ? waveEntries(context?.productAssemblyWaves) : ''}`
 		);
 		return cached.payload;
 	}

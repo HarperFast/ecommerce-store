@@ -14,11 +14,13 @@ Revisit this decision when listing pages need catalog-wide sorting or filtering 
 
 An empty eligibility array means unrestricted. Probing the authoritative arrays directly would miss unrestricted promotions; scanning every promotion would be correct but costly at scale.
 
-Harper stores `tierKeys` and `categoryKeys` alongside the authoritative arrays. Each contains the same values, or `['*']` when unrestricted. One `in` probe per dimension, combined with AND, returns a **superset** of eligible promotions. `isEligible` then checks the authoritative tier, SKU, and category arrays.
+Each promotion row carries `tierKeys` and `categoryKeys` alongside the authoritative arrays. Each contains the same values, or `['*']` when unrestricted. The schema derives `eligibilityKeys` from them, one key per (tier key, category key) pair, and indexes it. A quote probes every pair its cart can match: its tier or `*`, crossed with each of its categories or `*`. The union of those equality probes is exactly the set both dimensions admit, a **superset** of eligible promotions. `isEligible` then checks the authoritative tier, SKU, and category arrays.
 
-[scripts/verify-promotion-index.mjs](../scripts/verify-promotion-index.mjs) checks that no eligible promotion is excluded for every tier × category combination. It runs in CI. SKU restrictions need no third probe for reachability: those promotions are reachable through the other two dimensions.
+The combined key replaces one indexed `in` probe per dimension, combined with AND. That form returned the same set, but Harper 5.3.2 has no index intersection and answers `in` by walking the attribute's whole index ([harper#3240](https://github.com/HarperFast/harper/issues/3240)), so a gold-tier cart in three categories walked all 5,000 `bench` index entries and read the 1,478 rows of one dimension to keep the 619 both admit. The combined key reads only the rows it returns. It costs one index entry per pair: 5,000 on `bench`, where every promotion has one of each, growing as the product if promotions carry several. The keys are computed rather than loaded, so the pinned dataset is unchanged; changing the expression reindexes the table. A row with missing or empty key arrays indexes as unrestricted on that dimension, so a malformed row costs candidates, never reachability, and never fails the write. Measurements are in the [plan](plan.md#promotion-candidates-on-bench-2026-10-16).
 
-Selectivity depends on the corpus. Most promotions target a tier, category, or SKU; a few are storewide. If most were unrestricted, the sentinel would match most rows and provide little benefit. Performance at benchmark scale remains unmeasured; see [open work](plan.md#open).
+[scripts/verify-promotion-index.mjs](../scripts/verify-promotion-index.mjs) evaluates the schema's expression on every row and probes with the quote's key builder, checking that no eligible promotion is excluded for every tier × category combination, including rows with missing or empty keys. It runs in CI and also fails if the two stop agreeing on the key format. SKU restrictions need no third probe for reachability: those promotions are reachable through the other two dimensions.
+
+Selectivity depends on the corpus. Most promotions target a tier, category, or SKU; a few are storewide. If most were unrestricted, the sentinel would match most rows and provide little benefit.
 
 ## Schema choices
 
@@ -47,4 +49,4 @@ Per-worker memos of the location and rate tables expire after 500 ms, half of `F
 ## Open
 
 - **Pricing review:** the normative [promotion order](../SPEC.md#promotion-evaluation-order) still needs review by someone with pricing-engine experience.
-- **Index selectivity:** the recorded `dev` check narrowed candidates to 7.2% of the table. A tier-only probe is limited by four tiers plus storewide offers. A composite `(tierKey, categoryKey)` index or combined key might narrow further; measure at `bench` scale before choosing one.
+- **Promotion lookup at tier 2:** the combined key is measured on tier 1 with the `bench` promotions; its effect on the `bench` quote at tier 2 is not yet measured.
