@@ -1,15 +1,11 @@
-/**
- * The conditions a quote's candidate search sends: the campaign pairs its tier and categories
- * can match on `Promotion.eligibilityKeys`, whose `@computed` expression is in
- * schemas/store.graphql, and each of its SKUs on `Promotion.skus`.
- */
+/** The conditions of a quote's candidate search; `Promotion.eligibilityKeys` is computed in schemas/store.graphql. */
 import { UNRESTRICTED } from '@ecommerce-store/spec';
 
 function eligibilityKey(tierKey, categoryKey) {
 	return `${tierKey}|${categoryKey}`;
 }
 
-export function probeKeys(tier, categoryIds) {
+function probeKeys(tier, categoryIds) {
 	const categoryKeys = [...categoryIds, UNRESTRICTED];
 	const keys = [];
 	for (const tierKey of [tier, UNRESTRICTED]) {

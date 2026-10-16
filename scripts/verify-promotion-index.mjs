@@ -1,6 +1,6 @@
 /**
  * Assert that the quote's indexed candidate search returns exactly the specification's candidate
- * set (SPEC 0.3.0, "Promotions are read per quote"), and so a SUPERSET of the eligible set.
+ * set (the one ecommerce-store PR #7 adds to SPEC.md 0.3.0), and so a SUPERSET of the eligible set.
  *
  * If the search ever EXCLUDES an eligible promotion, quotes are silently cheaper and silently
  * wrong, which is what happened the first time this was indexed, when a promotion unrestricted
@@ -50,14 +50,13 @@ const indexed = new Set([...promotionType.matchAll(/^\s*(\w+):[^\n]*@indexed/gm)
 const declared = Object.fromEntries([...promotionType.matchAll(/^\s*(\w+):/gm)].map(([, name]) => [name, undefined]));
 const computedKeys = new Function('attributes', 'record', `with (attributes) { with (record) { return ${expression}; } }`);
 
-/** The values a row is indexed under, per attribute, as Harper would index them. */
 function indexedValues(promotion) {
 	const values = { eligibilityKeys: new Set(computedKeys(declared, promotion)) };
 	for (const name of indexed) if (!(name in values)) values[name] = new Set(promotion[name] ?? []);
 	return values;
 }
 
-/** The search the quote sends, run against the rows as Harper would index them: a union of equality probes. */
+// The quote's own conditions, as a union of equality probes over the rows as Harper indexes them.
 function search(rows, cart) {
 	const conditions = candidateConditions(cart.tier, cart.categoryIds, cart.skus);
 	for (const { attribute } of conditions) {
@@ -66,7 +65,6 @@ function search(rows, cart) {
 	return rows.filter((row) => conditions.some(({ attribute, value }) => row.values[attribute].has(value)));
 }
 
-/** The candidate set the specification defines. */
 function isCandidate(promotion, cart) {
 	if (promotion.skus?.length) return promotion.skus.some((sku) => cart.skus.includes(sku));
 	if (promotion.tiers?.length && !promotion.tiers.includes(cart.tier)) return false;
@@ -76,12 +74,13 @@ function isCandidate(promotion, cart) {
 
 const rows = promotions.map((promotion) => ({ promotion, values: indexedValues(promotion) }));
 
-// Rows the dataset may not contain: keys missing or empty, and a SKU-scoped promotion whose
-// tiers and categories alone would match, which must not be found through them.
+// Rows the dataset may not contain: arrays missing or empty, key fields that disagree with the
+// arrays, and SKU-scoped promotions whose tiers and categories alone would match.
 const synthetic = [
-	{}, { tierKeys: null, categoryKeys: null }, { tierKeys: [], categoryKeys: [] }, { tiers: ['gold'], tierKeys: ['gold'] }, { categoryIds: ['apparel'], categoryKeys: ['apparel'] },
-	{ skus: ['sku-synthetic'], tiers: ['gold'], tierKeys: ['gold'], categoryIds: ['apparel'], categoryKeys: ['apparel'] },
-	{ skus: ['sku-synthetic'], tierKeys: ['*'], categoryKeys: ['*'] },
+	{}, { tiers: null, categoryIds: null }, { tiers: [], categoryIds: [] }, { tiers: ['gold'] }, { categoryIds: ['apparel'] },
+	{ tiers: ['gold'], categoryIds: ['apparel'], tierKeys: ['*'], categoryKeys: ['*'] },
+	{ skus: ['sku-synthetic'], tiers: ['gold'], categoryIds: ['apparel'] },
+	{ skus: ['sku-synthetic'] },
 ].map((promotion, i) => ({ id: `synthetic-${i}`, ...promotion })).map((promotion) => ({ promotion, values: indexedValues(promotion) }));
 
 const TIERS = ['standard', 'silver', 'gold', 'platinum'];
@@ -112,17 +111,17 @@ for (const tier of TIERS) {
 		for (const skus of skuSets) {
 			checks++;
 			const cart = { tier, categoryIds, skus };
-			for (const row of synthetic) {
-				if (search([row], cart).length !== (isCandidate(row.promotion, cart) ? 1 : 0)) fail({ cart, row: row.promotion });
-			}
+			const lineSkus = [...skus, 'sku-unnamed'];
+			const check = (candidates, found) => {
+				for (const { promotion } of candidates) {
+					if (found.has(promotion.id) !== isCandidate(promotion, cart)) fail({ cart, promotion, found: found.has(promotion.id) });
+					if (!found.has(promotion.id) && lineSkus.some((sku) => isEligible(promotion, { tier, sku, categoryIds }))) fail({ cart, promotion, eligible: true });
+				}
+			};
+			check(synthetic, new Set(search(synthetic, cart).map((row) => row.promotion.id)));
 			const found = new Set(search(rows, cart).map((row) => row.promotion.id));
 			candidateTotal += found.size;
-			for (const { promotion } of rows) {
-				if (found.has(promotion.id) !== isCandidate(promotion, cart)) fail({ cart, promotion: promotion.id, found: found.has(promotion.id) });
-				// Anything eligible for some line of such a cart: one per SKU, and one whose SKU no promotion names.
-				const eligible = [...skus, 'sku-unnamed'].some((sku) => isEligible(promotion, { tier, sku, categoryIds }));
-				if (eligible && !found.has(promotion.id)) fail({ cart, promotion: promotion.id, eligible: true });
-			}
+			check(rows, found);
 		}
 	}
 }

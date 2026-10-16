@@ -229,14 +229,14 @@ export class quote extends Resource {
  * (harper#3240), then reads every row the first condition matches to test the second
  * (docs/data-model.md#promotion-eligibility-index).
  *
- * Now the specification defines the candidate set (SPEC 0.3.0): every promotion open to all
- * SKUs whose tiers and categories admit the cart, plus every promotion naming one of the cart's
- * SKUs, whatever its tiers and categories. Campaigns carry one `eligibilityKeys` entry per
- * (tier key, category key) pair — the AND of the two dimensions, computed by the schema and
- * indexed — and the cart asks for the pairs it can match. SKU-scoped promotions are found by
- * `skus`, one equality probe per cart SKU. Every probe is a bounded index range, and their
- * union is exactly the candidate set. `isEligible` still decides each line on all three
- * authoritative arrays.
+ * Now the specification defines the candidate set (ecommerce-store PR #7, SPEC.md 0.3.0):
+ * every promotion open to all SKUs whose tiers and categories admit the cart, plus every
+ * promotion naming one of the cart's SKUs, whatever its tiers and categories. Campaigns carry
+ * one `eligibilityKeys` entry per (tier, category) pair — the AND of the two dimensions,
+ * computed by the schema and indexed — and the cart asks for the pairs it can match.
+ * SKU-scoped promotions are found by `skus`, one equality probe per cart SKU. Every probe is a
+ * bounded index range, and their union is exactly the candidate set. `isEligible` still
+ * decides each line on all three authoritative arrays.
  *
  * The result is exactly the candidate set, and so a SUPERSET of the eligible set, never a
  * subset — `scripts/verify-promotion-index.mjs` checks both against the dataset.
