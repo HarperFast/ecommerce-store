@@ -10,24 +10,26 @@
  * from send to acknowledgement, every log file written must then be made durable after its last
  * write and before the acknowledgement, by one of:
  *
- *   - a successful `fsync` or `fdatasync` of that same file;
- *   - a successful `syncfs` on a log descriptor, or `sync`;
- *   - every write to it going through a descriptor opened `O_DSYNC` or `O_SYNC`.
+ *   - a successful `fsync` or `fdatasync` of that same file, or `sync`;
+ *   - every write to it synchronous: through a descriptor opened `O_DSYNC` or `O_SYNC`, or a
+ *     `pwritev2` with `RWF_DSYNC` or `RWF_SYNC`.
  *
  * A sync of another file, a background flush, `sync_file_range` (which only starts writeback)
- * and `msync` (which cannot be tied to the log from a trace) are not evidence. An interval with
- * no write to the log, or one whose descriptor flags cannot be established, is inconclusive
- * rather than a failure, and so is the whole run if no interval failed.
+ * and `msync` (which cannot be tied to the log from a trace) are not evidence. The verdict is
+ * inconclusive, rather than a failure, for an interval with no write to the log, one whose
+ * synchronous flags cannot be established, one whose only barrier is a `syncfs` (its filesystem
+ * is not in the trace), and one writing a log file created during the run whose directory was
+ * not synced. Renames and unlinks are not traced.
  *
  * Client times are `Date.now()` milliseconds and strace's are the same wall clock, to the
  * microsecond. A sync may finish up to 1 ms after the recorded acknowledgement, because
  * `Date.now()` truncates; the request's own transit makes the matching slack at the send side
  * harmless.
  */
-export const SYNC_CALLS = ['fsync', 'fdatasync', 'sync_file_range', 'sync_file_range2', 'syncfs', 'sync', 'msync'];
-export const WRITE_CALLS = ['write', 'writev', 'pwrite64', 'pwritev', 'pwritev2'];
+const SYNC_CALLS = ['fsync', 'fdatasync', 'sync_file_range', 'sync_file_range2', 'syncfs', 'sync', 'msync'];
+const WRITE_CALLS = ['write', 'writev', 'pwrite64', 'pwritev', 'pwritev2'];
 /** Calls that change what a descriptor refers to, traced so its flags are known at each write. */
-export const DESCRIPTOR_CALLS = ['open', 'openat', 'openat2', 'creat', 'close', 'dup', 'dup2', 'dup3', 'fcntl'];
+const DESCRIPTOR_CALLS = ['open', 'openat', 'openat2', 'creat', 'close', 'dup', 'dup2', 'dup3', 'fcntl'];
 export const TRACED = [...SYNC_CALLS, ...WRITE_CALLS, ...DESCRIPTOR_CALLS];
 
 /** `O_DSYNC`; Linux's `O_SYNC` includes this bit. */
@@ -84,42 +86,62 @@ export function parseStrace(text) {
 }
 
 /**
- * Whether each write's descriptor was `O_DSYNC` when it ran: `true`, `false`, or `null` when
- * that cannot be established. Starts from `snapshot` (`tgid:fd` → `{ path, dsync }`, read once
- * the tracer was attached, at `snapshotMs`) and replays every later open, dup and close, so a
- * descriptor closed and reopened during the run is judged by the flags it had at each write.
+ * Whether each write was synchronous when it ran: `true`, `false`, or `null` when that cannot be
+ * established. A `pwritev2` with `RWF_DSYNC` or `RWF_SYNC` is synchronous whatever its
+ * descriptor. Otherwise the descriptor's `O_DSYNC` flag decides, starting from `snapshot`
+ * (`tgid:fd` → `{ path, dsync }`, read between `snapshotMs` and `snapshotEndMs` once the tracer
+ * was attached) and replaying every later open, dup and close. A descriptor that changed while
+ * the snapshot was being read, or while a write through it was running, is unknown.
+ *
+ * Also returns the log-relevant paths opened `O_CREAT` during the trace, with when: syncing a new
+ * file's contents does not make its directory entry durable.
  */
-export function descriptorFlags(calls, { tasks, snapshot, snapshotMs }) {
+export function descriptorFlags(calls, { tasks, snapshot, snapshotMs, snapshotEndMs = snapshotMs }) {
 	const table = new Map(snapshot);
 	const flags = new Map();
+	const created = new Map();
 	const tgidOf = (tid) => tasks.get(tid) ?? null;
 	const changes = calls.filter((c) => DESCRIPTOR_CALLS.includes(c.call) && c.ok && c.endMs > snapshotMs);
 	const writes = calls.filter((c) => WRITE_CALLS.includes(c.call) && c.ok);
+	/** The descriptor a change replaces or removes. */
+	const targetOf = (change) => (change.call === 'close' ? change.fd : change.call === 'fcntl' && !/F_DUPFD/.test(change.args) ? null : change.returned);
+	const overlaps = (a, b) => a.startMs <= b.endMs && b.startMs <= a.endMs;
 	const events = [
 		...changes.map((c) => ({ at: c.endMs, change: c })),
 		...writes.map((c) => ({ at: c.startMs, write: c })),
 	].sort((a, b) => a.at - b.at);
 	for (const { change, write } of events) {
 		if (write) {
+			if (/\bRWF_D?SYNC\b/.test(write.args)) {
+				flags.set(write, true);
+				continue;
+			}
 			const tgid = tgidOf(write.tid);
 			const entry = tgid === null ? undefined : table.get(`${tgid}:${write.fd}`);
-			flags.set(write, entry && entry.path === write.path ? entry.dsync : null);
+			const racing = changes.some((c) => tgidOf(c.tid) === tgid && targetOf(c) === write.fd && overlaps(c, write));
+			flags.set(write, entry && !racing && entry.path === write.path ? entry.dsync : null);
 			continue;
 		}
 		const tgid = tgidOf(change.tid);
 		if (tgid === null) continue;
-		if (change.call === 'close') {
-			table.delete(`${tgid}:${change.fd}`);
-		} else if (change.call === 'fcntl' && !/F_DUPFD/.test(change.args)) {
-			// F_SETFL cannot set or clear O_DSYNC on Linux; other commands do not change a descriptor.
+		const target = targetOf(change);
+		if (target === null) continue; // F_SETFL cannot set or clear O_DSYNC on Linux.
+		const key = `${tgid}:${target}`;
+		if (change.startMs <= snapshotEndMs) {
+			// Changed while the snapshot was being read: which state the snapshot holds is unknown.
+			if (change.call === 'close') table.delete(key);
+			else table.set(key, { path: change.returnedPath, dsync: null });
+		} else if (change.call === 'close') {
+			table.delete(key);
 		} else if (change.call === 'dup' || change.call === 'dup2' || change.call === 'dup3' || change.call === 'fcntl') {
 			const source = table.get(`${tgid}:${change.fd}`);
-			table.set(`${tgid}:${change.returned}`, source ? { ...source } : { path: change.returnedPath, dsync: null });
+			table.set(key, source ? { ...source } : { path: change.returnedPath, dsync: null });
 		} else {
-			table.set(`${tgid}:${change.returned}`, { path: change.returnedPath, dsync: /\bO_(D)?SYNC\b/.test(change.args) });
+			table.set(key, { path: change.returnedPath, dsync: /\bO_D?SYNC\b/.test(change.args) });
 		}
+		if ((change.call === 'creat' || /\bO_CREAT\b/.test(change.args)) && change.returnedPath) created.set(change.returnedPath, change.endMs);
 	}
-	return flags;
+	return { flags, created };
 }
 
 /**
@@ -127,13 +149,13 @@ export function descriptorFlags(calls, { tasks, snapshot, snapshotMs }) {
  * path fragment naming the commit log; `flags` comes from `descriptorFlags`. The verdict is
  * `holds`, `fails` (some interval wrote the log and did not make it durable) or `inconclusive`.
  */
-export function judgeDurability(writes, calls, { log, flags = new Map() }) {
+export function judgeDurability(writes, calls, { log, flags = new Map(), created = new Map() }) {
 	const inLog = (path) => typeof path === 'string' && path.includes(log);
 	const logWrites = calls.filter((c) => WRITE_CALLS.includes(c.call) && c.ok && inLog(c.path));
 	const syncs = calls.filter((c) => SYNC_CALLS.includes(c.call) && c.ok);
 	const within = (c, w) => c.startMs >= w.sentMs && c.endMs <= w.ackedMs + 1;
-	const barrierFor = (sync, path) =>
-		((sync.call === 'fsync' || sync.call === 'fdatasync') && sync.path === path) || (sync.call === 'syncfs' && inLog(sync.path)) || sync.call === 'sync';
+	const barrierFor = (sync, path) => ((sync.call === 'fsync' || sync.call === 'fdatasync') && sync.path === path) || sync.call === 'sync';
+	const parentOf = (path) => path.slice(0, path.lastIndexOf('/')) || '/';
 
 	const judge = (w) => {
 		const written = logWrites.filter((c) => within(c, w));
@@ -142,9 +164,16 @@ export function judgeDurability(writes, calls, { log, flags = new Map() }) {
 			const toPath = written.filter((c) => c.path === path);
 			const last = Math.max(...toPath.map((c) => c.endMs));
 			const barrier = syncs.find((s) => within(s, w) && s.startMs >= last && barrierFor(s, path));
-			if (barrier) return { result: 'holds', why: `${barrier.call} after the log write` };
 			const dsync = toPath.map((c) => flags.get(c) ?? null);
-			if (dsync.every((d) => d === true)) return { result: 'holds', why: 'O_DSYNC log write' };
+			const held = barrier ? `${barrier.call} after the log write` : dsync.every((d) => d === true) ? 'O_DSYNC log write' : null;
+			if (held && created.has(path)) {
+				// A new file's contents can be durable while its directory entry is not.
+				const at = created.get(path);
+				const dirSynced = syncs.some((s) => (s.call === 'fsync' || s.call === 'fdatasync') && s.path === parentOf(path) && s.startMs >= at && s.endMs <= w.ackedMs + 1);
+				if (!dirSynced && !(barrier?.call === 'sync' && barrier.startMs >= at)) return { result: 'inconclusive', why: 'log file created, directory not synced' };
+			}
+			if (held) return { result: 'holds', why: held };
+			if (syncs.some((s) => within(s, w) && s.startMs >= last && s.call === 'syncfs' && inLog(s.path))) return { result: 'inconclusive', why: 'syncfs, filesystem unknown' };
 			if (dsync.some((d) => d === null)) return { result: 'inconclusive', why: 'descriptor flags unknown' };
 			return { result: 'fails', why: 'log written, not synced' };
 		});

@@ -29,7 +29,7 @@ test('a WAL append synced inside every write holds', () => {
 
 test('log appends with no sync fail, as on Harper 5.3.2 with RocksDB', () => {
 	const calls = parseStrace(trace((i) => [`9 ${sec(i * 10 + 2)} writev(${TXNLOG}, [{iov_base="x", iov_len=1}], 1) = 1 <0.000020>`]));
-	const flags = descriptorFlags(calls, { tasks: new Map([[9, 9]]), snapshot: new Map([['9:14', { path: '/db/transaction_logs/local/1.txnlog', dsync: false }]]), snapshotMs: T0 - 1000 });
+	const { flags } = descriptorFlags(calls, { tasks: new Map([[9, 9]]), snapshot: new Map([['9:14', { path: '/db/transaction_logs/local/1.txnlog', dsync: false }]]), snapshotMs: T0 - 1000 });
 	const result = judgeDurability(writes, calls, { log: '/transaction_logs/', flags });
 	assert.equal(result.verdict, 'fails');
 	assert.match(result.detail[0], /0 durable, 10 not/);
@@ -64,11 +64,11 @@ test('O_DSYNC is judged by the flags each write ran with, opens and closes repla
 	const tasks = new Map([[431, 430]]);
 	const opened = `431 ${sec(-500)} openat(AT_FDCWD</var/lib/postgresql/data>, "pg_wal/000000010000000000000001", O_WRONLY|O_DSYNC|O_CLOEXEC) = 12<${WAL_PATH}> <0.000030>`;
 	const dsync = parseStrace([opened, trace((i) => [walAppend(i)])].join('\n'));
-	const fromOpen = judgeDurability(writes, dsync, { log: '/pg_wal/', flags: descriptorFlags(dsync, { tasks, snapshot: new Map(), snapshotMs: T0 - 1000 }) });
+	const fromOpen = judgeDurability(writes, dsync, { log: '/pg_wal/', flags: descriptorFlags(dsync, { tasks, snapshot: new Map(), snapshotMs: T0 - 1000 }).flags });
 	assert.equal(fromOpen.verdict, 'holds', 'opened O_DSYNC during the trace');
 	assert.match(fromOpen.detail[0], /O_DSYNC log write 10/);
 
-	const fromSnapshot = descriptorFlags(parseStrace(trace((i) => [walAppend(i)])), { tasks, snapshot: new Map([['430:12', { path: WAL_PATH, dsync: true }]]), snapshotMs: T0 - 1000 });
+	const { flags: fromSnapshot } = descriptorFlags(parseStrace(trace((i) => [walAppend(i)])), { tasks, snapshot: new Map([['430:12', { path: WAL_PATH, dsync: true }]]), snapshotMs: T0 - 1000 });
 	assert.ok([...fromSnapshot.values()].every((d) => d === true), 'open before the trace, flags from the snapshot');
 
 	// Reopened without O_DSYNC halfway through: the later writes are not durable.
@@ -78,10 +78,42 @@ test('O_DSYNC is judged by the flags each write ran with, opens and closes repla
 		`431 ${sec(46)} openat(AT_FDCWD</var/lib/postgresql/data>, "pg_wal/000000010000000000000001", O_WRONLY|O_CLOEXEC) = 12<${WAL_PATH}> <0.000030>`,
 		trace((i) => (i >= 5 ? [walAppend(i, 2)] : [])),
 	].join('\n'));
-	const flags = descriptorFlags(reopened, { tasks, snapshot: new Map([['430:12', { path: WAL_PATH, dsync: true }]]), snapshotMs: T0 - 1000 });
+	const { flags } = descriptorFlags(reopened, { tasks, snapshot: new Map([['430:12', { path: WAL_PATH, dsync: true }]]), snapshotMs: T0 - 1000 });
 	const result = judgeDurability(writes, reopened, { log: '/pg_wal/', flags });
 	assert.equal(result.verdict, 'fails');
 	assert.match(result.detail[0], /5 durable, 5 not/);
+});
+
+test('per-write RWF_DSYNC is synchronous whatever the descriptor', () => {
+	const calls = parseStrace(trace((i) => [`431 ${sec(i * 10 + 1)} pwritev2(${WAL}, [{iov_base="x", iov_len=8192}], 1, 0, RWF_DSYNC) = 8192 <0.000400>`]));
+	const { flags } = descriptorFlags(calls, { tasks: new Map([[431, 430]]), snapshot: new Map([['430:12', { path: WAL_PATH, dsync: false }]]), snapshotMs: T0 - 1000 });
+	assert.equal(judgeDurability(writes, calls, { log: '/pg_wal/', flags }).verdict, 'holds');
+});
+
+test('what the trace cannot tie to the log is inconclusive, not a pass', () => {
+	const tasks = new Map([[431, 430]]);
+	const known = (calls) => descriptorFlags(calls, { tasks, snapshot: new Map([['430:12', { path: WAL_PATH, dsync: false }]]), snapshotMs: T0 - 1000 });
+	const verdictOf = (lines) => {
+		const calls = parseStrace(lines);
+		const { flags, created } = known(calls);
+		return judgeDurability(writes, calls, { log: '/pg_wal/', flags, created }).verdict;
+	};
+	assert.equal(verdictOf(trace((i) => [walAppend(i), `431 ${sec(i * 10 + 2)} syncfs(9</mnt/b/pg_wal/other>) = 0 <0.000500>`])), 'inconclusive', 'syncfs on a filesystem the trace cannot name');
+
+	const created = `431 ${sec(-500)} openat(AT_FDCWD</var/lib/postgresql/data>, "pg_wal/000000010000000000000001", O_WRONLY|O_CREAT|O_EXCL) = 12<${WAL_PATH}> <0.000030>`;
+	assert.equal(verdictOf([created, trace((i) => [walAppend(i), walSync(i)])].join('\n')), 'inconclusive', 'a new log file whose directory was never synced');
+	const dirSync = `431 ${sec(-400)} fsync(13</var/lib/postgresql/data/pg_wal>) = 0 <0.000500>`;
+	assert.equal(verdictOf([created, dirSync, trace((i) => [walAppend(i), walSync(i)])].join('\n')), 'holds', 'its directory synced after creation');
+
+	// The snapshot was being read while fd 12 was duplicated: neither copy's flags are known.
+	const racing = parseStrace([`431 ${sec(-995)} dup2(${WAL}, 13) = 13<${WAL_PATH}> <0.000010>`, trace((i) => [walAppend(i).replace('pwrite64(12<', 'pwrite64(13<')])].join('\n'));
+	const { flags: raceFlags } = descriptorFlags(racing, { tasks, snapshot: new Map([['430:12', { path: WAL_PATH, dsync: true }]]), snapshotMs: T0 - 1000, snapshotEndMs: T0 - 990 });
+	assert.equal(judgeDurability(writes, racing, { log: '/pg_wal/', flags: raceFlags }).verdict, 'inconclusive', 'dup during the snapshot');
+
+	// A dup2 onto fd 12 overlapping a write through it: the write's flags are unknown.
+	const overlapping = parseStrace([trace((i) => [walAppend(i)]), `431 ${sec(1.01)} dup2(5</var/lib/postgresql/data/pg_wal/x>, 12) = 12<${WAL_PATH}> <0.000100>`].join('\n'));
+	const { flags: overlapFlags } = descriptorFlags(overlapping, { tasks, snapshot: new Map([['430:12', { path: WAL_PATH, dsync: true }]]), snapshotMs: T0 - 1000 });
+	assert.equal(judgeDurability(writes, overlapping, { log: '/pg_wal/', flags: overlapFlags }).verdict, 'inconclusive', 'replaced mid-write');
 });
 
 test('a call interrupted by another thread is joined across its unfinished and resumed lines', () => {

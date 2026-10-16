@@ -104,6 +104,7 @@ for (const pid of PIDS) {
 		}
 	}
 }
+const snapshotEndMs = Date.now() + 1;
 
 const writes = [];
 try {
@@ -126,7 +127,8 @@ if (died !== null) inconclusive(`strace exited during the run (${died}), so the 
 
 const calls = parseStrace(await readFile(log, 'utf8'));
 await rm(dir, { recursive: true, force: true });
-const { verdict, detail } = judgeDurability(writes, calls, { log: LOG, flags: descriptorFlags(calls, { tasks, snapshot, snapshotMs }) });
+const { flags, created } = descriptorFlags(calls, { tasks, snapshot, snapshotMs, snapshotEndMs });
+const { verdict, detail } = judgeDurability(writes, calls, { log: LOG, flags, created });
 
 console.log(`durability: ${sku} via ${BASE_URL}, tracing ${PIDS.join(',')}`);
 for (const line of detail) console.log(`  ${line}`);
