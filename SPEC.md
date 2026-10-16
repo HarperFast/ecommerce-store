@@ -136,7 +136,7 @@ Wave 4 is part of the measured fan-out. **Every quote reads its candidate set fr
 - every promotion **open to every SKU** (empty `skus`) whose `tiers` is empty or contains `t`, and whose `categoryIds` is empty or shares a member with `C`; and
 - every promotion whose **`skus` share a member with `S`**, whatever its tiers and categories.
 
-Every promotion eligible for some line is in this set. Application code then decides each line's eligibility on all three dimensions ([step 1](#promotion-evaluation-order)). A lookup that returns exactly this set does the work the workload defines. A lookup that returns more pays for the extra rows itself, and the review records it. A lookup that returns less can miss an eligible promotion.
+**A promotion restricted to SKUs is a candidate only through its SKUs.** Its tiers and categories decide eligibility, never candidacy, so a lookup by tier and category covers only the promotions open to every SKU. Every promotion eligible for some line is in this set. Application code then decides each line's eligibility on all three dimensions ([step 1](#promotion-evaluation-order)). A lookup that returns exactly this set does the work the workload defines. A lookup that returns more pays for the extra rows itself, and the review records it. A lookup that returns less can miss an eligible promotion.
 
 An implementation keeps no promotion cache, no cache of candidate sets and no in-memory promotion index, whether per process or in a separate cache tier. The datastore's own buffer pool or record cache is part of the datastore and is not a promotion cache.
 
