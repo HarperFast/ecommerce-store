@@ -8,10 +8,11 @@
 # means a loader bug, and failing loudly at write time beats discovering it in a result.
 #
 # @indexed only where the application queries: Variant.productId (the product view's variant
-# lookup) and the promotion eligibility keys. Every other read is by primary key or a scan of a
-# small lookup table. An index nothing queries is paid for on every load and write and in
-# storage — 62 million entries on Inventory alone at `bench` — and a benchmark should not
-# carry dead weight on either side. Add one back with the query that needs it.
+# lookup) and the promotion candidate keys (eligibilityKeys, skus). Every other read is by
+# primary key or a scan of a small lookup table. An index nothing queries is paid for on every
+# load and write and in storage — 62 million entries on Inventory alone at `bench` — and a
+# benchmark should not carry dead weight on either side. Add one back with the query that
+# needs it.
 
 type Cart @table @export @sealed {
 	id: ID @primaryKey
@@ -71,19 +72,19 @@ type Promotion @table @export @sealed {
 	# Empty array means "no restriction on this dimension". Kept as the authoritative
 	# eligibility data; `isEligible` reads these.
 	tiers: [String]
-	skus: [String]
+	skus: [String] @indexed
 	categoryIds: [String]
-	# The indexable form: the same values, or ['*'] when unrestricted. An index cannot match
-	# an empty array, so without the sentinel a probe can never return a promotion that
-	# applies to everything — which is how the first indexed lookup lost 14% of the corpus.
+	# The dataset's indexable form of tiers and categories: the same values, or ['*'] when
+	# unrestricted. Loaded but not queried; eligibilityKeys derives the same keys from the
+	# authoritative arrays, so the index cannot drift from what `isEligible` reads.
 	tierKeys: [String]
 	categoryKeys: [String]
-	# One entry per (tier key, category key) pair, so the quote's lookup is a union of equality
-	# probes (docs/data-model.md#promotion-eligibility-index). Missing or empty keys index as
-	# unrestricted: the index must stay a superset, and a throw here would fail the write or
-	# leave the index rebuilding. Must build the keys resources/lib/promotion-index.js probes
-	# for; scripts/verify-promotion-index.mjs checks they agree.
-	eligibilityKeys: [String] @computed(from: "(tierKeys?.length ? tierKeys : ['*']).flatMap((tierKey) => (categoryKeys?.length ? categoryKeys : ['*']).map((categoryKey) => tierKey + '|' + categoryKey))") @indexed
+	# Campaigns only (empty `skus`): one entry per (tier, category) pair, `*` standing for an
+	# empty array, which no index can match. A promotion naming SKUs gets none: the
+	# specification makes it a candidate by its SKUs alone, found through the `skus` index
+	# (docs/data-model.md#promotion-eligibility-index). Must build the keys
+	# resources/lib/promotion-index.js probes for; scripts/verify-promotion-index.mjs checks.
+	eligibilityKeys: [String] @computed(from: "skus?.length ? [] : (tiers?.length ? tiers : ['*']).flatMap((tier) => (categoryIds?.length ? categoryIds : ['*']).map((categoryId) => tier + '|' + categoryId))") @indexed
 	thresholdMinor: Int
 	amountMinor: Int
 	amountBasisPoints: Int
