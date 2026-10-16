@@ -1,6 +1,6 @@
 # Development plan
 
-**Last updated:** 2026-10-15 · **Spec version:** `0.2.0-draft` · **Harper:** `5.3.2` · **Dataset generator:** `0.5.0`
+**Last updated:** 2026-10-16 · **Spec version:** `0.3.0-draft` · **Harper:** `5.3.2` · **Dataset generator:** `0.6.0`
 
 This file tracks status, blockers, and observations. [README.md](../README.md) introduces the application. Requirement ids live in [SPEC.md](../SPEC.md) and its registry; coverage comes from `npm run check`; dataset counts and hashes come from each `MANIFEST.json`.
 
@@ -18,17 +18,35 @@ Results are never published from this repo.
 
 | Piece | State |
 |---|---|
-| Specification | Draft, with two rounds of cross-model review applied. Review gate remains open; [Conformance](../SPEC.md#conformance) is the authoritative gate record. |
-| Schema and caching | Eight entities plus derived `ProductView`, keyed by product × tier × region; invalidation after the write commits, with an expiry backstop. Secondary indexes only where queried. Lookup-table memos expire within `FRESH_MS`. |
+| Specification | Draft `0.3.0-draft`, with two rounds of cross-model review and the 2026-10-16 rulings applied. Review gate remains open; [Conformance](../SPEC.md#conformance) is the authoritative gate record. |
+| Schema and caching | Eight entities plus derived `ProductView`, keyed by product × tier × region; invalidation after the write commits, with an expiry backstop. Secondary indexes only where queried. Lookup-table memos expire at 500 ms, which `CACHE-002` no longer requires. |
 | Write surface | `POST /admin/variant/:sku` and `POST /admin/inventory/:id` write and invalidate. |
 | Endpoints | Quote and product aggregate built and covered by conformance tests. Both emit data, compute, and total. |
 | Background writer | Harness-side only; no in-application writer. |
-| Datasets | Generator `0.5.0`: carts drawn from a scrambled discrete Zipf. `dev` in plain git, `bench` in Git LFS; checksum-verified before loading. |
-| Conformance | Every MUST has declared coverage; execution and assertion gaps remain below. |
+| Datasets | Generator `0.6.0`: promotions reach every pricing phase at both scales; carts drawn from a scrambled discrete Zipf. `dev` in plain git, `bench` in Git LFS; checksum-verified before loading. |
+| Conformance | Every MUST has declared coverage. The reference fails `WRITE-005` on Harper 5.3.2 ([harper#3243](https://github.com/HarperFast/harper/issues/3243)); CI runs that check as a non-blocking step. Execution and assertion gaps remain below. |
 | Harness and containers | Load ladder, 2 CPU / 2 GiB target, snapshot restore with provenance, per-step target CPU from cgroups, run-record verification after every trial. For tier 2: slice placement, per-step cycles joined from the host's sampler, a second build of the target by commit (`TARGET_REF`), and published-run settings (60 s steps, seeded Poisson arrivals, base images pinned by digest). No complete `bench` ladder yet; nothing has run on tier 2. |
 | CI | Repo checks and conformance on pushes and pull requests; LFS pulled only for dataset changes. Both jobs last recorded passing. |
 
 ## Recent work
+
+- **2026-10-16 — Specification rulings and dataset `0.6.0`** (Ethan, after the tier-2 [implementation review](https://github.com/HarperFast/application-architecture-benchmarks/blob/tier2-first-session/comparisons/ecommerce-store-rough/implementation-review.md); one PR, spec `0.3.0-draft`):
+  - **Promotions are read per quote, from a defined candidate set.** No promotion cache, cached candidate set or in-memory promotion index on either side ([workload rule](../SPEC.md#promotions-are-read-per-quote)). The candidate set is the promotions open to every SKU that match the tier and a cart category, plus every promotion naming a cart SKU; `isCandidate` in `@ecommerce-store/spec` states it. No request can observe the rule, so the implementation review checks it.
+  - **`CACHE-002` covers writes through the write surface only.** Rows the write surface cannot change need no bound, so the `location` and `rate` memos need no expiry; the reference keeps its 500 ms. **A quote need not read one snapshot;** an implementation that does discloses it as an advantage.
+  - **`WRITE-005`: an acknowledged write is synced before it is acknowledged;** caches may be volatile. The reference fails it until [harper#3243](https://github.com/HarperFast/harper/issues/3243) is fixed, an exception recorded in [Conformance](../SPEC.md#review-gate). [verify-durability.mjs](../scripts/verify-durability.mjs) traces sync calls around 50 sequential writes and requires one inside each. Its parser is unit-tested in `npm run check`; the live trace runs in CI as a non-blocking step, since nothing here has strace.
+  - **Tier multipliers stay in SPEC.md,** and [check-tier-multipliers.mjs](../scripts/check-tier-multipliers.mjs) fails `npm run check` if the pricing engine or the seed disagrees.
+  - **Dataset `0.6.0`.** Only `promotion` changed. 120 campaign promotions are identical at both scales, with exclusives bounded to one per category in four categories, each for one member tier. Cart-wide thresholds are scoped to a tier and a category. The other 40 (`dev`) and 4,880 (`bench`) promotions are each restricted to one popular product's SKUs. Share of carts in which each phase produced a discount, now checked by [verify-pricing-phases.mjs](../scripts/verify-pricing-phases.mjs):
+
+    | | Exclusive | Threshold | BOGO | Stackable | 3 stackables on a line | Cap reached | Product promotion | Mean discount |
+    |-|-|-|-|-|-|-|-|-|
+    | `dev` `0.5.0` | 66.8% | 27.4% | 9.0% | 25.8% | 21.9% | 11.2% | 0% | 20.9% |
+    | `dev` `0.6.0` | 13.0% | 60.0% | 47.3% | 76.3% | 54.1% | 13.2% | 20.8% | 34.4% |
+    | `bench` `0.5.0` | 100% | 0% | 0% | 0% | 0% | 0% | 0% | 19.7% |
+    | `bench` `0.6.0` | 13.9% | 59.0% | 47.0% | 76.9% | 50.6% | 12.4% | 31.5% | 34.0% |
+
+  - **Lookup cost moves.** Each product promotion carries its product's category, so today's tier × category lookups still return every candidate. They return about 909 rows per `bench` quote (634 under `0.5.0`) against a candidate set of about 10. Bounding exclusives alone would have left about 630 eligible promotions per `bench` cart, and thresholds alone hit the cap on 86% of them.
+  - **Verified:** `verify-promotion-index.mjs` on `dev` and `bench`. All 300,000 `bench` carts price identically offline from the tier × category probe, the candidate set and a full scan. All 2,000 `dev` quotes from a fresh load in a local Harper are byte-identical to that offline model. Conformance passes 24/24, `verify-coherence.mjs` passes, and so does `npm run check`.
+  - **Follows from this:** the reference's lookup and the Fastify target's query must probe by SKU, and the Fastify loader and `diff-reference.mjs` must move to generator `0.6.0`; see [Open](#open).
 
 - **2026-10-15 — Ready for the first tier-2 session** (Ethan: Harper against Fastify + Postgres + Redis on GCP; checked against application-architecture-benchmarks `origin/gcp-tier2` at `68b7a3c`):
   - **Placement.** `compose.tier2.yaml` matches `host-setup.sh`: the target in `bench.slice/bench-target.slice` (CPUs 2–3, 2 GiB, no swap), the generator in `bench-generator.slice` (CPUs 4–7). A container cannot see its slice's limits, so Harper keeps its own 2 GiB limit to size its caches from; its CPU quota is dropped. Verification fails a tier-2 record whose target ran outside the slice or without a memory limit.
@@ -63,8 +81,8 @@ Validation: full `npm run check` passes in this checkout, including deployment s
 
 ## Next
 
-1. **Run `bench` on the tier-2 host: Harper against Fastify + Postgres + Redis, and Harper's quote batching against the build before it.** The procedure is in [containers/README.md](../containers/README.md#tier-2). Budget the time: a trial is about 30 minutes (a 20-minute warm-up, seven 60 s steps, restore and cold start), so three builds at three trials each is about 4.5 hours plus 20 minutes of seeding per target, against the VM's 8-hour limit. `bench` never runs locally; `DATA-004` evidence comes from tier 2. The local 5.3.2 snapshots stay in the main checkout's `containers/.snapshots/`.
-2. **Re-run the Fastify + Postgres + Redis target (application-architecture-benchmarks #6) against dataset `0.5.0`.** It is pinned to `1f4a350`, which carries the `0.4.0` dataset and the old access distribution.
+1. **Run `bench` on the tier-2 host: Harper against Fastify + Postgres + Redis, and Harper's quote batching against the build before it.** On dataset `0.6.0`, the first to reach every pricing phase on `bench`; both promotion lookups should probe by SKU first ([Open](#open)). The procedure is in [containers/README.md](../containers/README.md#tier-2). Budget the time: a trial is about 30 minutes (a 20-minute warm-up, seven 60 s steps, restore and cold start), so three builds at three trials each is about 4.5 hours plus 20 minutes of seeding per target, against the VM's 8-hour limit. `bench` never runs locally; `DATA-004` evidence comes from tier 2. The local 5.3.2 snapshots stay in the main checkout's `containers/.snapshots/`.
+2. **Move the Fastify + Postgres + Redis target to dataset `0.6.0`.** Its loader and `diff-reference.mjs` pin an ecommerce-store commit; both move to generator `0.6.0`, and its promotion query gains the SKU probe.
 3. **Add independent expected values.** Build a correctness suite keyed to the dataset manifest checksum. Conformance checks shape and consistency; the harness also needs expected quotes derived independently from the implementation under test. Publish expected values as data so every stack compares against the same answers without sharing pricing code.
 4. **Confirm `FRESH_MS`.** The provisional budget in [Background writes](../SPEC.md#background-writes) needs run evidence; `PDP-003` and `WRITE-002` depend on it.
 5. **Add an in-application background writer.** The harness currently drives writes through the application write surface. This exercises coherence but differs from application-owned background work.
@@ -167,14 +185,16 @@ Follow-up hypotheses:
 | Gap | Needed action or decision |
 |---|---|
 | **No ground-truth guard.** The harness counts every 2xx as success. Determinism does not prove correctness. | Add pinned, independently computed expected quotes; see Next. |
-| **Pricing phases are unevenly exercised.** Exclusive and threshold promotions each reach roughly half of `dev` carts; BOGO and stackable discounts barely register under the shared 60% cap. | Decide between changing the cap, narrowing cart-wide eligibility, or changing order. Each changes the workload and requires coordinated dataset regeneration. |
+| **The reference fails `WRITE-005`.** Harper 5.3.2 on RocksDB acknowledges a commit without syncing it ([harper#3243](https://github.com/HarperFast/harper/issues/3243)). Decided 2026-10-16: the requirement stands, and the reference stays in comparisons with the failure and the skipped sync per write disclosed. | Fix upstream, then make CI's durability step blocking. Until then every comparison states it. |
+| **Promotion lookups are not SKU-aware.** Under dataset `0.6.0` both implementations' tier × category lookups return about 909 rows per `bench` quote against a [candidate set](../SPEC.md#promotions-are-read-per-quote) of about 10. | The reference (the `promotion-search` worktree) and the Fastify target each add a probe by the cart's SKUs and check that it returns the candidate set. |
+| **`verify-durability.mjs` has not traced a live target.** Nothing here has strace. Its judgment is unit-tested on synthetic logs; CI's first run against Harper should report 50 writes and no syncs. Untraced: Postgres's backends committing WAL. | Read the first CI run; run it against the Fastify target on the tier-2 host. |
 | **Promotion-index benefit is unmeasured.** Sentinel probes pass completeness checks and narrow candidates, but are marginally slower than a scan on `dev`. | Measure at `bench` scale before claiming a benefit; quote fan-out may still dominate. |
 | **Unexplained `dev` latency.** One step had p90 in seconds; a higher step had single-digit milliseconds. Quotes were slow, not products. On 5.3.2, stalls of up to 15 s hit five of 54 `dev` steps, in both builds, only while Zoom and a Chrome tab loaded the host. | Treat as host contention unless tier 2 shows it; the 2026-10-05 write-lock hypothesis predates 5.3.1. |
 | **Quote batching is unproven.** On `dev` it costs 13% more target CPU per quote and raises quote p99; see [quote batching on `dev`](#quote-batching-on-dev-2026-10-15). Ethan keeps it in for now. | Alternate the checkout with `TARGET_REF=dd3a5f5^` in the tier-2 session, and decide from it. |
 | **The write surface and response details are specified by tests, not `SPEC.md`.** The harness and suite require `POST /admin/variant/:sku` `{basePrice}`, `POST /admin/inventory/:id` `{onHand}`, an `invalidated` count in each write response, the `Server-Timing` grammar (`cache;desc=hit\|miss`, `data`, `compute`, `total`), and quote fields (`currency`, `region`, `taxJurisdiction`, `totalWeight`) that only [model.ts](../packages/spec/src/model.ts) names. | Specify them, or name `packages/spec` as normative, before a second implementation is built against the prose. |
 | **Metric definitions differ across stacks.** `invalidated` counts keys targeted (Harper writes an invalidation marker even for a never-cached key); a Redis `DEL` count is keys removed. Harper reports a request that waited on another request's in-flight fill as a hit. `total` excludes response serialization in both handlers. | Define each in `SPEC.md` so cache-hit rates and invalidation fan-out compare. |
 | **`DATA-004` is undemonstrated.** With every key reachable and the cache dropped, a local 10-minute soak filled 87% of the target's memory and was still growing; nothing was evicted. `verify-run-record.mjs` fails such a run: no cgroup reached 90% of its limit while still reading from disk. | Decided: a fixed `bench` warm-up of 120,000 requests at 100 rps (about 20 minutes), which verification checks. Show `DATA-004` on tier 2; `bench` no longer runs locally. Re-running the first rate at the end to measure drift is still open. |
-| **The Fastify target uses the old dataset.** application-architecture-benchmarks #6 is pinned to `1f4a350` (dataset `0.4.0`, the old distribution). | Follow up against dataset `0.5.0` before any comparison. |
+| **The Fastify target uses an old dataset.** Its loader and `diff-reference.mjs` pin an ecommerce-store commit before generator `0.6.0`, and `diff-reference.mjs` cannot read `bench`'s compressed files. | Move both to generator `0.6.0` before any comparison. |
 | **Network softirq is not charged to a cgroup.** Bridge traffic between a separated stack's containers is partly unaccounted, and on tier 2 may run outside the target's CPUs; Harper has no such hops. | On tier 2, record per-step softirq for the target CPUs, or steer bridge interrupts onto them; disclose either way. |
 | **Duplicate SKU lines allocate inventory twice.** Promotions merge lines by SKU; availability does not, so a repeated SKU understates `shortfall`. The dataset has no such carts. | Clarify in `SPEC.md` whether lines merge for availability and in the response. |
 | **Untested until the Linux host.** `sample.sh`'s per-cgroup CSV has never been captured, so the join reads it by perf's documented column order (tested against the probe's real per-CPU output). Also untested: `!reset` under Docker's Compose plugin, cgroup accounting of a `docker-<id>.scope` inside `bench-target.slice`, the join waiting on perf's flush, the page-cache hook under `sudo`, the x86-64 image build, and a real Fastify target beside Harper. | Check each in the first session's shakedown trial, before the measured trials. |
@@ -185,10 +205,8 @@ Follow-up hypotheses:
 
 ## Open decisions
 
-- **Tier multipliers:** currently normative in [Resolved unit price](../SPEC.md#resolved-unit-price). Moving them into `rate` rows with `kind: 'tier'` would pin them in the dataset and remove unchecked duplication between pricing code and seed vocabulary. Coordinate any regeneration with the pricing-phase decision.
 - **Facet counting:** three options remain open in [future work](future-work.md#product-listing-facets-and-search).
-- **Promotion lookup:** compare indexed array probes with a combined key at benchmark scale; see [data model](data-model.md#open).
-- **Write durability across stacks:** `SPEC.md` does not say whether an acknowledged background write must survive a crash, or whether caches may be volatile. Harper's cache rows are written through the same durable path as its source of truth; Redis need not be.
+- **Promotion lookup:** compare indexed array probes with a combined key at benchmark scale; since dataset `0.6.0` the lookup must also probe the cart's SKUs. See [data model](data-model.md#open).
 - **Unknown query values:** the product endpoint answers 400 for an unknown region and prices an unknown tier as `standard`. `SPEC.md` specifies only the tier rule.
 - **`@export` on the eight tables:** a super-user REST surface no comparison measures, and a write path that bypasses invalidation. Keep, or remove so the write surface is the only one.
 - **The 5.2 `bench` snapshot** (`containers/.snapshots/bench.tar.gz`, no provenance, every index) cannot be restored under 5.3.2 without `ALLOW_UNVERIFIED_SNAPSHOT=1`. Delete once a 5.3.2 ladder has run.
@@ -202,6 +220,8 @@ Follow-up hypotheses:
 - **Component CPU breakdowns:** Harper is one container; per-container accounting exists but no assembled stack has been measured.
 - **Benchmark results from `dev`:** it fits in memory.
 - **Any number from dataset `0.4.0`**, which covers every run before 2026-10-14: the access distribution and the carts have changed.
+- **Any quote number from dataset `0.5.0` as a measure of pricing:** every `bench` quote stopped at an exclusive promotion, and `0.6.0` changed the promotions every quote reads.
+- **That the reference conforms, or that write paths compare like for like:** the reference fails `WRITE-005` on Harper 5.3.2, and every comparison must disclose the sync it skips per write.
 - **Latency or target CPU from runs before 2026-10-12:** latency carries the dispatch artifact, target CPU was never recorded, and 5.2.12 images ran without msgpackr native acceleration.
 
 [bench/README.md](../bench/README.md#limitations) describes the harness limits. No run produced here is publishable.

@@ -177,10 +177,10 @@ const EXCLUSIVE_TIERS = ['silver', 'gold'] as const;
  *
  * So the corpus is two populations, interleaved by id:
  *
- * - `CAMPAIGNS` campaign promotions, the same structure at every scale. Exclusives are bounded:
- *   one each in `EXCLUSIVE_CATEGORIES` categories, each for one member tier, with a minimum
- *   spend. Cart-wide thresholds are scoped to one tier AND one category, so a cart meets one or
- *   two rather than enough to reach the cap on their own.
+ * - `CAMPAIGNS` campaign promotions, identical at every scale. Exclusives are bounded: one each
+ *   in `EXCLUSIVE_CATEGORIES` categories, each for one member tier, with a minimum spend.
+ *   Cart-wide thresholds are scoped to one tier AND one category, so few are eligible for any
+ *   one cart and they leave BOGO and stackable promotions headroom under the cap.
  * - Product promotions for the rest, which is where a large catalog's offers are. Each is
  *   restricted to one product's SKUs and that product's category, and most are open to every
  *   tier. Products are drawn from the access distribution, so promoted products are popular
