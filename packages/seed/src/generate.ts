@@ -76,9 +76,11 @@ export function variantShape(scale: Scale, rng: Rng): number[] {
 	return counts;
 }
 
-export function* products(scale: Scale, counts: number[], rng: Rng): Generator<Record<string, unknown>> {
+/** `categoryOf`, when given, receives each product's category index: product promotions need it. */
+export function* products(scale: Scale, counts: number[], rng: Rng, categoryOf?: Uint8Array): Generator<Record<string, unknown>> {
 	for (let i = 0; i < scale.products; i++) {
 		const categoryIndex = rng.int(0, CATEGORIES.length - 1);
+		if (categoryOf) categoryOf[i] = categoryIndex;
 		// Related items point at nearby ids, so the fan-out reads a clustered set rather than
 		// a uniformly random one — which is what a real "related products" list looks like.
 		const relatedCount = rng.int(2, 5);
@@ -148,41 +150,70 @@ export function* inventory(scale: Scale, counts: number[], rng: Rng): Generator<
 	}
 }
 
-export function* promotions(scale: Scale, rng: Rng): Generator<Record<string, unknown>> {
-	for (let i = 0; i < scale.promotions; i++) {
-		// Exclusives short-circuit everything, so they stay genuinely rare: at 8% they reached
-		// 78% of carts, because a category-scoped exclusive matches any cart containing that
-		// category and carts span several.
-		const kind = rng.weighted([['stackable', 46], ['threshold', 26], ['bogo', 25], ['exclusive', 3]] as const);
+/**
+ * Campaign promotions: the store-wide, tier and category offers a merchandising team runs. A
+ * fixed number at every scale, because the tiers and categories they target are a fixed
+ * vocabulary; a bigger catalog adds product offers, not campaigns.
+ */
+export const CAMPAIGNS = 120;
 
-		// Exclusive promotions SHORT-CIRCUIT the whole evaluation: if one applies, nothing else
-		// does. An earlier corpus gave every tier unrestricted exclusives, so every non-empty
-		// cart took that branch and threshold, BOGO and stackable were never evaluated at all —
-		// three of the four advertised pricing phases absent from the measured path. Exclusives
-		// are therefore rare AND always narrowly scoped.
-		// Exclusives are scoped by CATEGORY only, not category AND tier. Doubly-restricting them
-		// made them unreachable: a sweep of 150 dev carts applied zero exclusives and zero
-		// BOGOs, so two of the four pricing phases were dead in the workload. A phase that
-		// never fires is a phase the benchmark does not measure, which is the same defect as
-		// exclusives firing on everything — just in the other direction.
-		// Storewide promotions are RARE.
-		//
-		// Nearly half this corpus used to be unrestricted on tier and on category, which is not
-		// a shape any real store has — a handful of offers run storewide, the rest target a
-		// category, a tier, or a SKU. It also made the eligibility index nearly useless: an
-		// unrestricted promotion matches every probe, so a probe returned 31% of the table.
-		const narrow = kind === 'exclusive';
-		const byCategory = narrow || !rng.chance(0.08);
-		const row: Record<string, unknown> = {
-			id: `promo-${pad(i, 4)}`,
-			kind,
-			tiers: narrow ? [] : rng.chance(0.78) ? [rng.pick(TIERS)] : [],
-			skus: [],
-			categoryIds: byCategory ? [rng.pick(CATEGORIES)] : [],
-			thresholdMinor: kind === 'threshold' ? rng.int(5_000, 40_000) : 0,
-			amountMinor: 0,
-			amountBasisPoints: 0,
-		};
+/** Exclusives: at most one per category, in this many categories, each for one member tier. */
+export const EXCLUSIVE_CATEGORIES = 4;
+const EXCLUSIVE_TIERS = ['silver', 'gold'] as const;
+
+/**
+ * Promotions — QUOTE-005, SPEC.md#promotion-evaluation-order.
+ *
+ * The corpus has to reach every pricing phase at BOTH scales, and it failed that twice before:
+ *
+ * - Exclusives short-circuit everything. An early corpus gave every tier unrestricted
+ *   exclusives, so no other phase ran. Generator 0.5.0 drew 3% of rows as exclusives, scoped by
+ *   category only: `dev`'s 4 reached 67% of carts, and `bench`'s 168 covered every category with
+ *   no threshold, so EVERY `bench` quote stopped at the exclusive step and threshold, BOGO,
+ *   stackable and the cap applied in none.
+ * - Density. `bench` had 31 times `dev`'s promotions in the same 52 tier x category cells, so
+ *   about 630 were eligible for every `bench` cart. With exclusives bounded, thresholds alone
+ *   hit the 60% cap on 86% of `bench` carts, leaving BOGO and stackable nothing to discount.
+ *
+ * So the corpus is two populations, interleaved by id:
+ *
+ * - `CAMPAIGNS` campaign promotions, identical at every scale. Exclusives are bounded: one each
+ *   in `EXCLUSIVE_CATEGORIES` categories, each for one member tier, with a minimum spend.
+ *   Cart-wide thresholds are scoped to one tier AND one category, so few are eligible for any
+ *   one cart and they leave BOGO and stackable promotions headroom under the cap.
+ * - Product promotions for the rest, which is where a large catalog's offers are. Each is
+ *   restricted to one product's SKUs and that product's category, and most are open to every
+ *   tier. Products are drawn from the access distribution, so promoted products are popular
+ *   ones, as they are in a real store; no product is drawn twice. These are the only rows that
+ *   exercise QUOTE-005's SKU dimension.
+ *
+ * Interleaved, because ties and the three-stackables-per-line limit go by ascending id: product
+ * promotions numbered after every campaign would almost never get a line's stackable slots.
+ * Campaigns, products and the interleaving each draw from their own stream, so the campaign
+ * rows are identical at every scale.
+ *
+ * `scripts/verify-pricing-phases.mjs` fails `npm run check` if any phase leaves its band.
+ */
+export function* promotions(scale: Scale, counts: number[], categoryOf: Uint8Array, seed: string): Generator<Record<string, unknown>> {
+	const order = new Rng(`${seed}:order`);
+	const campaignRng = new Rng(`${seed}:campaign`);
+	const productRng = new Rng(`${seed}:product`);
+	const shuffled = [...CATEGORIES];
+	for (let k = shuffled.length - 1; k > 0; k--) {
+		const j = campaignRng.int(0, k);
+		[shuffled[k], shuffled[j]] = [shuffled[j], shuffled[k]];
+	}
+	const exclusiveCategories = shuffled.slice(0, EXCLUSIVE_CATEGORIES);
+	const promoted = new Set<number>();
+	let campaigns = 0;
+	for (let i = 0; i < scale.promotions; i++) {
+		const campaignsLeft = CAMPAIGNS - campaigns;
+		const campaign = order.next() < campaignsLeft / (scale.promotions - i);
+		const row = campaign
+			? campaignPromotion(campaigns, exclusiveCategories, campaignRng)
+			: productPromotion(scale, counts, categoryOf, promoted, productRng);
+		if (campaign) campaigns++;
+		row.id = `promo-${pad(i, 4)}`;
 		// Indexable eligibility keys.
 		//
 		// `tiers: []` means "no restriction on tier", which no index can match — a probe for
@@ -192,20 +223,72 @@ export function* promotions(scale: Scale, rng: Rng): Generator<Record<string, un
 		// both "matches this tier" and "applies to every tier".
 		row.tierKeys = (row.tiers as string[]).length ? row.tiers : [UNRESTRICTED];
 		row.categoryKeys = (row.categoryIds as string[]).length ? row.categoryIds : [UNRESTRICTED];
-
-		if (kind === 'bogo') {
-			row.amountBasisPoints = 10000; // the free unit
-		} else if (rng.chance(0.75)) {
-			row.amountBasisPoints = rng.int(500, 2_500);
-		} else {
-			// Fixed-amount promotions carry a MINIMUM SPEND. Without one, a 1,644-minor discount
-			// landed on a 1,325-minor cart and priced it to zero — the engine capping at the
-			// subtotal correctly, against data no real store would publish.
-			row.amountMinor = rng.int(200, 3_000);
-			row.thresholdMinor = (row.amountMinor as number) * rng.int(4, 10);
-		}
 		yield row;
 	}
+}
+
+function campaignPromotion(n: number, exclusiveCategories: string[], rng: Rng): Record<string, unknown> {
+	if (n < exclusiveCategories.length) {
+		return {
+			kind: 'exclusive',
+			tiers: [EXCLUSIVE_TIERS[n % EXCLUSIVE_TIERS.length]],
+			skus: [],
+			categoryIds: [exclusiveCategories[n]],
+			thresholdMinor: rng.int(15_000, 40_000),
+			amountMinor: 0,
+			amountBasisPoints: rng.int(1_500, 3_000),
+		};
+	}
+	const kind = rng.weighted([['stackable', 50], ['threshold', 25], ['bogo', 25]] as const);
+	// Cart-wide thresholds are narrow, scoped to a tier AND a category. Storewide promotions are
+	// rare: a probe for an unrestricted row returns it for every cart.
+	const narrow = kind === 'threshold';
+	const row: Record<string, unknown> = {
+		kind,
+		tiers: narrow || rng.chance(0.78) ? [rng.pick(TIERS)] : [],
+		skus: [],
+		categoryIds: narrow || !rng.chance(0.08) ? [rng.pick(CATEGORIES)] : [],
+		thresholdMinor: kind === 'threshold' ? rng.int(8_000, 40_000) : 0,
+		amountMinor: 0,
+		amountBasisPoints: 0,
+	};
+	if (kind === 'bogo') {
+		row.amountBasisPoints = 10000; // the free unit
+	} else if (rng.chance(0.75)) {
+		row.amountBasisPoints = rng.int(500, 1_500);
+	} else {
+		// Fixed-amount promotions carry a MINIMUM SPEND. Without one, a 1,644-minor discount
+		// landed on a 1,325-minor cart and priced it to zero — the engine capping at the
+		// subtotal correctly, against data no real store would publish.
+		row.amountMinor = rng.int(200, 3_000);
+		row.thresholdMinor = (row.amountMinor as number) * rng.int(4, 10);
+	}
+	return row;
+}
+
+function productPromotion(scale: Scale, counts: number[], categoryOf: Uint8Array, promoted: Set<number>, rng: Rng): Record<string, unknown> {
+	// Collisions are redrawn, as cart lines are; past 16 draws the next unpromoted product in id
+	// order is taken, so the row count never depends on luck.
+	let productIndex = -1;
+	for (let attempt = 0; attempt < 16 && productIndex < 0; attempt++) {
+		const candidate = scramble(rng.zipfRank(scale.products), scale.products);
+		if (!promoted.has(candidate)) productIndex = candidate;
+	}
+	if (productIndex < 0) {
+		productIndex = 0;
+		while (promoted.has(productIndex)) productIndex++;
+	}
+	promoted.add(productIndex);
+	const kind = rng.weighted([['stackable', 75], ['bogo', 25]] as const);
+	return {
+		kind,
+		tiers: rng.chance(0.3) ? [rng.pick(TIERS)] : [],
+		skus: Array.from({ length: counts[productIndex] }, (_, v) => sku(productIndex, v)),
+		categoryIds: [CATEGORIES[categoryOf[productIndex]]],
+		thresholdMinor: 0,
+		amountMinor: 0,
+		amountBasisPoints: kind === 'bogo' ? 10000 : rng.int(500, 2_500),
+	};
 }
 
 export function* rates(): Generator<Record<string, unknown>> {

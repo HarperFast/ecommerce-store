@@ -17,16 +17,19 @@
     "seed": "node packages/seed/src/cli.ts",
     "typecheck": "tsc --build",
     "test:e2e": "npm test --prefix e2e",
-    "check": "npm run check:spec && npm run check:anchors && npm run check:coverage && npm run check:index && npm run check:distribution && npm run check:cycles && npm run check:memory && npm run check:dataset && npm run typecheck && npm run check:deploy",
+    "check": "npm run check:spec && npm run check:tiers && npm run check:anchors && npm run check:coverage && npm run check:index && npm run check:phases && npm run check:distribution && npm run check:cycles && npm run check:memory && npm run check:durability && npm run check:dataset && npm run typecheck && npm run check:deploy",
     "check:spec": "node scripts/check-spec-sync.mjs",
+    "check:tiers": "node scripts/check-tier-multipliers.mjs",
     "check:anchors": "node --test scripts/check-spec-anchors.test.mjs && node scripts/check-spec-anchors.mjs",
     "check:coverage": "npm run coverage --prefix e2e",
     "check:deploy": "./scripts/verify-deploy.sh",
     "check:index": "node scripts/verify-promotion-index.mjs --scale dev",
     "check:dataset": "node scripts/verify-dataset.mjs --scale dev",
+    "check:phases": "node scripts/verify-pricing-phases.mjs --scale dev && node scripts/verify-pricing-phases.mjs --scale bench --if-present",
     "check:distribution": "node --test scripts/verify-access-distribution.test.mjs",
     "check:cycles": "node --test bench/cycles.test.mjs",
-    "check:memory": "node --test scripts/memory-pressure.test.mjs"
+    "check:memory": "node --test scripts/memory-pressure.test.mjs",
+    "check:durability": "node --test scripts/durability.test.mjs"
   },
   "dependencies": {
     "@ecommerce-store/spec": "*"

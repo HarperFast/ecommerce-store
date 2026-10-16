@@ -44,11 +44,19 @@ jobs:
       - name: Every MUST has a test
         run: npm run check:coverage
 
+      - name: SPEC.md, pricing and the seed agree on tier multipliers
+        run: npm run check:tiers
+
       # The promotion index narrows 5,000 rows to a candidate set. If that narrowing can ever
       # EXCLUDE an eligible promotion, quotes get silently cheaper and silently wrong — which
       # is what happened the first time this was indexed. Runs offline against the dataset.
       - name: The promotion index never excludes an eligible promotion
         run: npm run check:index
+
+      # Every pricing phase has to fire in the workload, or the benchmark does not measure it.
+      # `bench` needs LFS, so the dataset workflow checks it.
+      - name: The dev dataset reaches every pricing phase
+        run: node scripts/verify-pricing-phases.mjs --scale dev
 
       # The generator and the harness share one access distribution; its head claim is checked
       # by counting draws, and its scramble by exhausting the key space.
@@ -63,6 +71,10 @@ jobs:
       # DATA-004's memory evidence must not depend on how a target divides its budget.
       - name: The working-set test is fair to a split budget and fails one that fits
         run: npm run check:memory
+
+      # WRITE-005's judgment, on synthetic strace logs; the live trace runs in conformance.
+      - name: The durability check counts only syncs inside each write
+        run: npm run check:durability
 
       # DATA-001/002/003/005 are properties of the committed artifact, not of a request.
       - name: The dataset matches its manifest and is not pre-joined
@@ -151,6 +163,18 @@ jobs:
       # appear. Last, because it mutates prices.
       - name: Cache coherence under concurrency
         run: node scripts/verify-coherence.mjs --url http://localhost:9926 --seconds 10
+
+      # WRITE-005: each of 50 sequential writes must make the commit log durable before it is
+      # acknowledged.
+      # Known open against the reference: Harper 5.3.2 on RocksDB never syncs a commit
+      # (HarperFast/harper#3243), so this step fails until the engine is fixed. It runs anyway,
+      # so the gap stays visible and the checker keeps running on Linux.
+      - name: Acknowledged writes are synced (known open, harper#3243)
+        continue-on-error: true
+        run: |
+          command -v strace >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq strace; }
+          sudo sysctl -w kernel.yama.ptrace_scope=0
+          node scripts/verify-durability.mjs --url http://localhost:9926 --pid "$(pgrep -o -f 'harper run')" --log /transaction_logs/
 
       - name: Harper log
         if: failure()

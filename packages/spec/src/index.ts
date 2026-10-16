@@ -6,8 +6,9 @@
  * does not belong in this package.
  */
 
-export const SPEC_VERSION = '0.2.0-draft' as const;
+export const SPEC_VERSION = '0.3.0-draft' as const;
 
+export * from './candidates.ts';
 export * from './model.ts';
 export * from './requirements.ts';
 export * from './routes.ts';

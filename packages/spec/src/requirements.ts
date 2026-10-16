@@ -32,7 +32,7 @@ export const REQUIREMENTS: readonly Requirement[] = [
 
 	// Caching — derived, bounded, correctly keyed.
 	r('CACHE-001', 'CACHE', 'MUST', 'Caches are derived: dropping every cache changes no response body, only latency'),
-	r('CACHE-002', 'CACHE', 'MUST', 'Every cached value is bounded by FRESH_MS, by invalidation or expiry, and says which'),
+	r('CACHE-002', 'CACHE', 'MUST', 'Every cached value a write-surface write can change is bounded by FRESH_MS, by invalidation or expiry, and says which'),
 	r('CACHE-003', 'CACHE', 'MUST', 'A cache key includes every dimension the cached value varies by'),
 
 	// POST /cart/:id/quote
@@ -61,6 +61,7 @@ export const REQUIREMENTS: readonly Requirement[] = [
 	r('WRITE-002', 'WRITE', 'MUST', 'A committed write is observable on the aggregate and in quote pricing within FRESH_MS'),
 	r('WRITE-003', 'WRITE', 'MUST', 'Coherence is not satisfied by disabling caching; cache-hit rates are recorded'),
 	r('WRITE-004', 'WRITE', 'MUST', 'The write stream is identical in rate and key distribution for every target'),
+	r('WRITE-005', 'WRITE', 'MUST', 'An acknowledged write is synced to stable storage in the source of truth before acknowledgement; caches may be volatile'),
 
 	// Observability
 	r('OBS-001', 'OBS', 'MUST', 'Both endpoints emit Server-Timing decomposing data access, compute and total'),

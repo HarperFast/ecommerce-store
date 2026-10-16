@@ -31,11 +31,15 @@ export const EPOCH_MS = 1_767_225_600_000;
  * published result — SPEC.md DATA-003, DATA-005.
  */
 /**
+ * 0.6.0 (2026-10-16): promotions reach every pricing phase at both scales: a fixed set of
+ * campaign promotions with exclusives bounded per category, and product-level promotions for
+ * the rest. Only `promotion` changed. Under 0.5.0 every `bench` quote stopped at an exclusive.
+ *
  * 0.5.0 (2026-10-12): cart lines draw products from a scrambled discrete Zipf (s = 0.8845)
  * instead of a continuous power law that put 22.5% of draws on index 0. Only `cart` changed;
  * every number produced before this version used 0.4.0.
  */
-export const GENERATOR_VERSION = '0.5.0' as const;
+export const GENERATOR_VERSION = '0.6.0' as const;
 
 export interface DatasetManifest {
 	specVersion: string;

@@ -1,6 +1,7 @@
 /**
  * Assert that the quote's indexed candidate search returns exactly the specification's candidate
- * set (the one ecommerce-store PR #7 adds to SPEC.md 0.3.0), and so a SUPERSET of the eligible set.
+ * set (SPEC.md#promotions-are-read-per-quote, stated as `isCandidate` in @ecommerce-store/spec),
+ * and so a SUPERSET of the eligible set.
  *
  * If the search ever EXCLUDES an eligible promotion, quotes are silently cheaper and silently
  * wrong, which is what happened the first time this was indexed, when a promotion unrestricted
@@ -19,6 +20,7 @@
 import { createReadStream, readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { join, resolve } from 'node:path';
+import { isCandidate } from '@ecommerce-store/spec';
 import { isEligible } from '../resources/lib/pricing.js';
 import { candidateConditions } from '../resources/lib/promotion-index.js';
 
@@ -63,13 +65,6 @@ function search(rows, cart) {
 		if (!indexed.has(attribute)) throw new Error(`a candidate condition names ${attribute}, which schemas/store.graphql does not index`);
 	}
 	return rows.filter((row) => conditions.some(({ attribute, value }) => row.values[attribute].has(value)));
-}
-
-function isCandidate(promotion, cart) {
-	if (promotion.skus?.length) return promotion.skus.some((sku) => cart.skus.includes(sku));
-	if (promotion.tiers?.length && !promotion.tiers.includes(cart.tier)) return false;
-	if (promotion.categoryIds?.length && !promotion.categoryIds.some((id) => cart.categoryIds.includes(id))) return false;
-	return true;
 }
 
 const rows = promotions.map((promotion) => ({ promotion, values: indexedValues(promotion) }));

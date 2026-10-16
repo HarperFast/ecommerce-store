@@ -52,8 +52,8 @@ async function invalidateViews(productId, region) {
 	const regions = region ? [region] : REGIONS;
 	const keys = [];
 	for (const r of regions) for (const tier of TIERS) keys.push(viewKey(productId, tier, r));
-	// In a transaction of its own rather than the request's next one: the write is already
-	// durable, so a client disconnect or a commit conflict on a hot view key in the request's
+	// In a transaction of its own rather than the request's next one: the write has already
+	// committed, so a client disconnect or a commit conflict on a hot view key in the request's
 	// scope must not cancel the eviction that makes the write visible. Retried, because a
 	// conflict with a concurrent fill of the same key is expected on hot products.
 	for (let attempt = 1; ; attempt++) {

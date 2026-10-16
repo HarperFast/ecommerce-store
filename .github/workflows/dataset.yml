@@ -3,18 +3,23 @@ name: Dataset integrity
 # The ONLY workflow that pulls Git LFS.
 #
 # The benchmark dataset is ~329 MB and every pull is billed against the org's LFS bandwidth
-# allowance, so this runs only when the dataset itself changes — which should be rare, since
-# it is a pinned contract rather than a working file — or when someone asks for it.
+# allowance, so this runs only when the dataset, its generator, or the pricing that judges its
+# phases changes — which should be rare, since the dataset is a pinned contract rather than a
+# working file — or when someone asks for it.
 on:
   push:
     branches: [main]
     paths:
       - 'dataset/bench/**'
       - 'packages/seed/**'
+      - 'resources/lib/pricing.js'
+      - 'scripts/verify-pricing-phases.mjs'
   pull_request:
     paths:
       - 'dataset/bench/**'
       - 'packages/seed/**'
+      - 'resources/lib/pricing.js'
+      - 'scripts/verify-pricing-phases.mjs'
   workflow_dispatch:
 
 concurrency:
@@ -39,6 +44,11 @@ jobs:
       # actually about rather than the transport.
       - name: Expand and verify
         run: node scripts/prepare-dataset.mjs --scale bench
+
+      # Generator 0.5.0 stopped every bench quote at an exclusive promotion while every dev check
+      # passed. The phases are a property of the data at each scale, so bench is checked here.
+      - name: The bench dataset reaches every pricing phase
+        run: node scripts/verify-pricing-phases.mjs --scale bench
 
       - name: Report sizes
         run: |
