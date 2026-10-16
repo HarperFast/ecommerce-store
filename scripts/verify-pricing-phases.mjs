@@ -26,7 +26,7 @@ import { open as openFile, readFile } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { createGunzip } from 'node:zlib';
 import { join, resolve } from 'node:path';
-import { isCandidate } from '@ecommerce-store/spec';
+import { isCandidate } from '../packages/spec/src/index.ts';
 import { evaluatePromotions, isEligible, resolveUnitPrice } from '../resources/lib/pricing.js';
 
 /**

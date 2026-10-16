@@ -57,7 +57,10 @@ async function writePrice(basePrice) {
 
 const dir = await mkdtemp(join(tmpdir(), 'durability-'));
 const log = join(dir, 'strace.log');
-const strace = spawn('strace', ['-f', '-ttt', '-T', '-y', '-qq', '-e', `trace=${SYNC_CALLS.join(',')}`, '-o', log, ...PIDS.flatMap((pid) => ['-p', pid])], { stdio: ['ignore', 'ignore', 'inherit'] });
+// A regex rather than a list: strace refuses a syscall name its platform lacks, and
+// `sync_file_range2` exists on arm64 but not on x86-64.
+const filter = `trace=/^(${SYNC_CALLS.join('|')})$`;
+const strace = spawn('strace', ['-f', '-ttt', '-T', '-y', '-qq', '-e', filter, '-o', log, ...PIDS.flatMap((pid) => ['-p', pid])], { stdio: ['ignore', 'ignore', 'inherit'] });
 const exited = new Promise((resolve, reject) => {
 	strace.on('error', reject);
 	strace.on('exit', resolve);
